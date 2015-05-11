@@ -28,6 +28,7 @@ static PROGMEM prog_uint32_t crc_table[16] = {
 #define TIME_PER_ITER    (20)               // time per iteration
 #define MIN_SEND_DELAY   (50)               // randomly send out packets within this time range
 #define MAX_SEND_DELAY   (500)              //   given in iterations
+#define TIME_TO_FLASH    (10)               // flash this many times upon synchronizing (given in iterations)
 
 SimpleTimer timer;
 
@@ -38,6 +39,7 @@ uint32_t clock = 0;
 uint32_t current_color = 0;
 uint32_t next_color = 0;
 uint32_t senddelay = 0;
+uint32_t flashing = 0;
 
 uint32_t last_packet_hash = 0;
 uint32_t packet[8] = {0, };
@@ -234,6 +236,9 @@ void meat()
           printf("out-of-sync time: %lu time+lag: %lu, current_color: %lu\n", packet[2], packet[2] + RF_LAG_TERM, packet[3]);
           #endif
           
+          // setup our flashing light to show we're syncing
+          flashing = TIME_TO_FLASH;
+          
           // copy timestamp and color
           clock = packet[2] + RF_LAG_TERM;
           
@@ -292,22 +297,11 @@ void meat()
     strip.show();
   } else {
     // fade between the two colors over ITERS_PER_COLOR iterations
-//    uint32_t color_diff;
-//    
-//    if (current_color > next_color)
-//    {
-//      color_diff = (MAX_FLOWERS - current_color) + next_color;
-//    } else {
-//      color_diff = next_color - current_color;
-//    }
-//    
-//    uint32_t fade_color = (current_color + (clock * color_diff / ITERS_PER_COLOR)) % MAX_FLOWERS;
-
-    uint32_t fade_color = 0;
+    uint32_t fade_color[4] = {0, };
     
     float fraction = (float)clock / (float)ITERS_PER_COLOR;
     
-    for (int i = 0; i < 3; i++)
+    for (int i = 0; i < 4; i++)
     {
       uint8_t from_color = (Wheel(current_color) >> (8 * i)) & 0xFF;
       uint8_t to_color = (Wheel(next_color) >> (8 * i)) & 0xFF;
@@ -320,19 +314,25 @@ void meat()
         merge = (uint8_t)(from_color - fraction * (from_color - to_color));
       }
       
-      printf("i: %u f: %u t: %u m: %u\n", i, from_color, to_color, merge);
-      
-      fade_color = (fade_color | merge) << 8;
+      fade_color[i] = (uint32_t)merge << (8 * i);
     }
 
-    #ifdef DEBUG
-    printf("from: %#010x\n", Wheel(current_color));
-    printf("to: %#010x\n", Wheel(next_color));
-    printf("fade: %#010x\n", fade_color);
-    #endif
+    strip.setPixelColor(0, fade_color[0] | fade_color[1] | fade_color[2] | fade_color[3]);
+    strip.show();
+  }
+  
+  // flash if we're flashing
+  if (flashing > 0)
+  {
+    if (flashing % 2 == 0)
+    {
+      strip.setPixelColor(0, strip.Color(255, 255, 255));
+    } else {
+      strip.setPixelColor(0, strip.Color(0, 0, 0)); 
+    }
     
-//    strip.setPixelColor(0, (uint32_t)fade_color);
-//    strip.show();
+    strip.show();
+    flashing--;
   }
   
   // update TTLs

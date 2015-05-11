@@ -5,7 +5,6 @@
 #include <Adafruit_NeoPixel.h>
 #include <SimpleTimer.h>
 #include <avr/pgmspace.h>
-#include <MemoryFree.h>
 
 static PROGMEM prog_uint32_t crc_table[16] = {
     0x00000000, 0x1db71064, 0x3b6e20c8, 0x26d930ac,
@@ -15,6 +14,7 @@ static PROGMEM prog_uint32_t crc_table[16] = {
 };
 
 #ifdef DEBUG
+#include <MemoryFree.h>
 #include <SoftwareSerial.h>
 #include "printf.h"
 #endif
@@ -24,7 +24,7 @@ static PROGMEM prog_uint32_t crc_table[16] = {
 #define RF_ADDR          (0xF0F0F0F0D2LL)
 #define MAX_FLOWERS      (255)
 #define FLOWER_TTL       (500)              // how many iterations to keep a flower in memory
-#define ITERS_PER_COLOR  (32)               // how long to display each flower's color
+#define ITERS_PER_COLOR  (64)               // how long to display each flower's color
 #define TIME_PER_ITER    (20)               // time per iteration
 #define MIN_SEND_DELAY   (50)               // randomly send out packets within this time range
 #define MAX_SEND_DELAY   (500)              //   given in iterations
@@ -64,27 +64,6 @@ uint32_t Wheel (byte WheelPos) {
     WheelPos -= 170;
     return strip.Color(WheelPos * 3 * brightness, (255 - WheelPos * 3) * brightness, 0);
   }
-}
-
-uint32_t color_fade (uint32_t *from_color, uint32_t *to_color, uint32_t step_num, uint32_t total_steps)
-{
-  uint8_t *from_color_array = (uint8_t*)from_color;
-  uint8_t *to_color_array = (uint8_t*)to_color;
-  uint8_t *final_color = (uint8_t*)malloc(sizeof(uint8_t) * 4);
-  
-  float fraction = (float)step_num / (float)total_steps;
-  
-  for (int i = 0; i < 4; i++)
-  {
-    if (from_color[i] < to_color[i])
-    {
-      final_color[i] = from_color[i] + fraction * (to_color[i] - from_color[i]);
-    } else {
-      final_color[i] = from_color[i] - fraction * (from_color[i] - to_color[i]);
-    }
-  }
-  
-  return (uint32_t)final_color;
 }
 
 uint32_t crc_update (uint32_t crc, byte data)
@@ -173,7 +152,7 @@ void meat()
     packet[0] = packet_hash;
     
     #ifdef DEBUG
-    printf("meat() sending packet id: %lu time: %lu current_color: %lu ttl: %lu hash: %lu",
+    printf("sending packet id: %lu time: %lu current_color: %lu ttl: %lu hash: %lu",
            uniqueid, clock, current_color, ttls[current_color], packet_hash);
     #endif
   

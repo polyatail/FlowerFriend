@@ -20,7 +20,7 @@ static PROGMEM prog_uint32_t crc_table[16] = {
 
 #define RF_DATA_RATE     RF24_250KBPS       // range vs. P(on-air collision) trade-off
 #define RF_LAG_TERM      (0)                // given in iterations, compensates for longer on-air time
-#define RF_CHANNEL       (0xF0F0F0F0D2LL)
+#define RF_ADDR          (0xF0F0F0F0D2LL)
 #define MAX_FLOWERS      (255)
 #define FLOWER_TTL       (500)              // how many iterations to keep a flower in memory
 #define ITERS_PER_COLOR  (32)               // how long to display each flower's color
@@ -100,8 +100,8 @@ void setup()
   radio.setAutoAck(0);
   radio.setPayloadSize(32);
   radio.setDataRate(RF_DATA_RATE);
-  radio.openWritingPipe(RF_CHANNEL);
-  radio.openReadingPipe(1, RF_CHANNEL);
+  radio.openWritingPipe(RF_ADDR);
+  radio.openReadingPipe(1, RF_ADDR);
   radio.startListening();
   
   #ifdef DEBUG

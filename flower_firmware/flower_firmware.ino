@@ -36,6 +36,7 @@ uint32_t ttls[MAX_FLOWERS] = {0, };
 uint32_t uniqueid = 0;
 uint32_t clock = 0;
 uint32_t current_color = 0;
+uint32_t next_color = 0;
 uint32_t senddelay = 0;
 
 uint32_t last_packet_hash = 0;
@@ -61,6 +62,27 @@ uint32_t Wheel (byte WheelPos) {
     WheelPos -= 170;
     return strip.Color(WheelPos * 3 * brightness, (255 - WheelPos * 3) * brightness, 0);
   }
+}
+
+uint32_t color_fade (uint32_t *from_color, uint32_t *to_color, uint32_t step_num, uint32_t total_steps)
+{
+  uint8_t *from_color_array = (uint8_t*)from_color;
+  uint8_t *to_color_array = (uint8_t*)to_color;
+  uint8_t *final_color = (uint8_t*)malloc(sizeof(uint8_t) * 4);
+  
+  float fraction = (float)step_num / (float)total_steps;
+  
+  for (int i = 0; i < 4; i++)
+  {
+    if (from_color[i] < to_color[i])
+    {
+      final_color[i] = from_color[i] + fraction * (to_color[i] - from_color[i]);
+    } else {
+      final_color[i] = from_color[i] - fraction * (from_color[i] - to_color[i]);
+    }
+  }
+  
+  return (uint32_t)final_color;
 }
 
 uint32_t crc_update (uint32_t crc, byte data)
@@ -133,7 +155,7 @@ void meat()
   if (senddelay == 0)
   {
     #ifdef DEBUG
-    printf("free memory: %lu\n", getFreeMemory());
+    printf("free memory: %d\n", getFreeMemory());
     #endif
     
     // fill packet
@@ -141,6 +163,8 @@ void meat()
     packet[2] = clock;
     packet[3] = current_color;
     packet[4] = ttls[current_color];
+    packet[5] = next_color;
+    packet[6] = ttls[next_color];
     
     // generate checksum (RF24 CRC doesn't check payload contents)
     uint32_t packet_hash = crc_packet(packet + 1);
@@ -192,6 +216,16 @@ void meat()
           #endif
              
           ttls[packet[3]] = packet[4];
+        }
+        
+        // same for their next color
+        if (ttls[packet[5]] < packet[6])
+        {
+          #ifdef DEBUG2
+          printf("mesh ttl update id: %lu old_ttl: %lu new_ttl: %lu\n", packet[5], ttls[packet[5]], packet[6]);
+          #endif
+             
+          ttls[packet[5]] = packet[6];
         } 
         
         if ((abs(packet[2] - clock) > 1 || current_color != packet[3]) && packet[1] < uniqueid)
@@ -238,11 +272,67 @@ void meat()
       }
     }
     
+    // it's lame to repeat code, but repeat that code to find the next color
+    for (uint32_t i = 0; i < MAX_FLOWERS; i++)
+    {
+      uint32_t my_i = (i + current_color + 1) % MAX_FLOWERS;
+      
+      if (ttls[my_i] > 0)
+      {
+        next_color = my_i;
+        break;
+      }
+    }
+    
     #ifdef DEBUG
-    printf("changing color: %lu ttl: %lu\n", current_color, ttls[current_color]);
+    printf("current_color: %lu ttl: %lu next_color: %lu ttl: %lu\n",
+           current_color, ttls[current_color], next_color, ttls[next_color]);
     #endif
     
     strip.show();
+  } else {
+    // fade between the two colors over ITERS_PER_COLOR iterations
+//    uint32_t color_diff;
+//    
+//    if (current_color > next_color)
+//    {
+//      color_diff = (MAX_FLOWERS - current_color) + next_color;
+//    } else {
+//      color_diff = next_color - current_color;
+//    }
+//    
+//    uint32_t fade_color = (current_color + (clock * color_diff / ITERS_PER_COLOR)) % MAX_FLOWERS;
+
+    uint32_t fade_color = 0;
+    
+    float fraction = (float)clock / (float)ITERS_PER_COLOR;
+    
+    for (int i = 0; i < 3; i++)
+    {
+      uint8_t from_color = (Wheel(current_color) >> (8 * i)) & 0xFF;
+      uint8_t to_color = (Wheel(next_color) >> (8 * i)) & 0xFF;
+      uint8_t merge = 0;
+      
+      if (from_color < to_color)
+      {
+        merge = (uint8_t)(from_color + fraction * (to_color - from_color));
+      } else {
+        merge = (uint8_t)(from_color - fraction * (from_color - to_color));
+      }
+      
+      printf("i: %u f: %u t: %u m: %u\n", i, from_color, to_color, merge);
+      
+      fade_color = (fade_color | merge) << 8;
+    }
+
+    #ifdef DEBUG
+    printf("from: %#010x\n", Wheel(current_color));
+    printf("to: %#010x\n", Wheel(next_color));
+    printf("fade: %#010x\n", fade_color);
+    #endif
+    
+//    strip.setPixelColor(0, (uint32_t)fade_color);
+//    strip.show();
   }
   
   // update TTLs

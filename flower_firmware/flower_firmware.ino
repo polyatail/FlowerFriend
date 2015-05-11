@@ -5,6 +5,7 @@
 #include <Adafruit_NeoPixel.h>
 #include <SimpleTimer.h>
 #include <avr/pgmspace.h>
+#include <MemoryFree.h>
 
 static PROGMEM prog_uint32_t crc_table[16] = {
     0x00000000, 0x1db71064, 0x3b6e20c8, 0x26d930ac,
@@ -131,6 +132,10 @@ void meat()
 {
   if (senddelay == 0)
   {
+    #ifdef DEBUG
+    printf("free memory: %lu\n", getFreeMemory());
+    #endif
+    
     // fill packet
     packet[1] = uniqueid;
     packet[2] = clock;
@@ -173,7 +178,7 @@ void meat()
       if (crc_packet(packet + 1) == packet[0])
       {
         #ifdef DEBUG
-        printf("meat() recv'd packet my_id: %lu their_id: %lu my_time: %lu their_time: %lu\n", uniqueid, packet[1], clock, packet[2]);
+        printf("recv'd packet my_id: %lu their_id: %lu my_time: %lu their_time: %lu\n", uniqueid, packet[1], clock, packet[2]);
         #endif
         
         // update the sender's TTL
@@ -182,8 +187,8 @@ void meat()
         // if the TTL of the color the sender is currently showing is greater than ours, update it
         if (ttls[packet[3]] < packet[4])
         {
-          #ifdef DEBUG
-          printf("meat() mesh ttl update id: %lu old_ttl: %lu new_ttl: %lu\n", packet[3], ttls[packet[3]], packet[4]);
+          #ifdef DEBUG2
+          printf("mesh ttl update id: %lu old_ttl: %lu new_ttl: %lu\n", packet[3], ttls[packet[3]], packet[4]);
           #endif
              
           ttls[packet[3]] = packet[4];
@@ -191,8 +196,8 @@ void meat()
         
         if ((abs(packet[2] - clock) > 1 || current_color != packet[3]) && packet[1] < uniqueid)
         {
-          #ifdef DEBUG
-          printf("meat() out-of-sync time: %lu time+lag: %lu, current_color: %lu\n", packet[2], packet[2] + RF_LAG_TERM, packet[3]);
+          #ifdef DEBUG2
+          printf("out-of-sync time: %lu time+lag: %lu, current_color: %lu\n", packet[2], packet[2] + RF_LAG_TERM, packet[3]);
           #endif
           
           // copy timestamp and color
@@ -205,15 +210,15 @@ void meat()
             
           current_color = packet[3];
         }
+      #ifdef DEBUG2
       } else {
-        #ifdef DEBUG
-        printf("meat() invalid crc %lu != %lu\n", crc_packet(packet + 1), packet[0]);
-        #endif 
-      }
-    } else {
-      #ifdef DEBUG
-      printf("meat() ignoring duplicate packet from id: %lu\n", packet[1]);
+        printf("invalid crc %lu != %lu\n", crc_packet(packet + 1), packet[0]);
       #endif
+      }
+    #ifdef DEBUG2
+    } else {
+      printf("ignore duplicate from id: %lu\n", packet[1]);
+    #endif
     }
   }
 
@@ -234,7 +239,7 @@ void meat()
     }
     
     #ifdef DEBUG
-    printf("meat() changing color to: %lu ttl: %lu\n", current_color, ttls[current_color]);
+    printf("changing color: %lu ttl: %lu\n", current_color, ttls[current_color]);
     #endif
     
     strip.show();
@@ -250,7 +255,7 @@ void meat()
       #ifdef DEBUG
       if (ttls[i] == 0)
       {
-        printf("meat() goodbye, friend! id: %lu\n", i); 
+        printf("goodbye id: %lu\n", i); 
       }
       #endif
     }

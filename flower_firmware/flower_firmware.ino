@@ -4,8 +4,9 @@
 #include <RF24.h>
 #include <Adafruit_NeoPixel.h>
 #include <SimpleTimer.h>
+#include <avr/pgmspace.h>
 
-static uint32_t crc_table[16] = {
+static PROGMEM prog_uint32_t crc_table[16] = {
     0x00000000, 0x1db71064, 0x3b6e20c8, 0x26d930ac,
     0x76dc4190, 0x6b6b51f4, 0x4db26158, 0x5005713c,
     0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c,
@@ -18,25 +19,25 @@ static uint32_t crc_table[16] = {
 #endif
 
 #define RF_DATA_RATE     RF24_250KBPS       // range vs. P(on-air collision) trade-off
-#define RF_LAG_TERM      (65)               // given in iterations, compensates for longer on-air time
+#define RF_LAG_TERM      (0)                // given in iterations, compensates for longer on-air time
 #define RF_CHANNEL       (0xF0F0F0F0D2LL)
 #define MAX_FLOWERS      (255)
-#define FLOWER_TTL       (300)              // how many iterations to keep a flower in memory
-#define ITERS_PER_COLOR  (128)              // how long to display each flower's color
+#define FLOWER_TTL       (500)              // how many iterations to keep a flower in memory
+#define ITERS_PER_COLOR  (32)               // how long to display each flower's color
 #define TIME_PER_ITER    (20)               // time per iteration
 #define MIN_SEND_DELAY   (50)               // randomly send out packets within this time range
 #define MAX_SEND_DELAY   (500)              //   given in iterations
 
 SimpleTimer timer;
 
-uint16_t ttls[MAX_FLOWERS] = {0, };
+uint32_t ttls[MAX_FLOWERS] = {0, };
 
-uint16_t uniqueid = 0;
-uint16_t clock = 0;
-uint16_t current_color = 0;
-uint16_t senddelay = 0;
+uint32_t uniqueid = 0;
+uint32_t clock = 0;
+uint32_t current_color = 0;
+uint32_t senddelay = 0;
 
-uint32_t last_recvd_packet[8] = {0, };
+uint32_t last_packet_hash = 0;
 uint32_t packet[8] = {0, };
 
 // radio
@@ -89,7 +90,7 @@ uint32_t crc_packet (uint32_t *my_packet)
 void setup()
 {
   #ifdef DEBUG
-  mySerial.begin(9600);
+  mySerial.begin(115200);
   printf_begin();
   #endif
 
@@ -113,7 +114,7 @@ void setup()
   strip.show();
   
   // setup timer and ID
-  randomSeed(analogRead(A0) + analogRead(A1));
+  randomSeed(analogRead(A0));
   uniqueid = random(0, MAX_FLOWERS);
   
   ttls[uniqueid] = FLOWER_TTL;
@@ -141,7 +142,7 @@ void meat()
     packet[0] = packet_hash;
     
     #ifdef DEBUG
-    printf("meat() sending packet id: %u time: %u current_color: %u ttl: %u hash: %lu",
+    printf("meat() sending packet id: %lu time: %lu current_color: %lu ttl: %lu hash: %lu",
            uniqueid, clock, current_color, ttls[current_color], packet_hash);
     #endif
   
@@ -151,9 +152,9 @@ void meat()
     
     #ifdef DEBUG
     if (ok)
-      printf(" success!\n");
+      printf(" success\n");
     else
-      printf(" failed!\n");
+      printf(" failed\n");
     #endif
     
     senddelay = random(MIN_SEND_DELAY, MAX_SEND_DELAY);
@@ -165,14 +166,14 @@ void meat()
   {
     radio.read(&packet, sizeof(packet));
     
-    if (memcmp(&packet, &last_recvd_packet, sizeof(packet)) != 0)
+    if (packet[0] != last_packet_hash)
     {
-      memcpy(&last_recvd_packet, &packet, sizeof(packet));
+      last_packet_hash = packet[0];
       
       if (crc_packet(packet + 1) == packet[0])
       {
         #ifdef DEBUG
-        printf("meat() recv'd packet my_id: %u their_id: %lu my_time: %u their_time: %lu\n", uniqueid, packet[1], clock, packet[2]);
+        printf("meat() recv'd packet my_id: %lu their_id: %lu my_time: %lu their_time: %lu\n", uniqueid, packet[1], clock, packet[2]);
         #endif
         
         // update the sender's TTL
@@ -182,7 +183,7 @@ void meat()
         if (ttls[packet[3]] < packet[4])
         {
           #ifdef DEBUG
-          printf("meat() mesh ttl update id: %lu old_ttl: %u new_ttl: %lu\n", packet[3], ttls[packet[3]], packet[4]);
+          printf("meat() mesh ttl update id: %lu old_ttl: %lu new_ttl: %lu\n", packet[3], ttls[packet[3]], packet[4]);
           #endif
              
           ttls[packet[3]] = packet[4];
@@ -220,9 +221,9 @@ void meat()
   if (clock % ITERS_PER_COLOR == 0)
   {
     // start looking from the current color onward
-    for (uint16_t i = 0; i < MAX_FLOWERS; i++)
+    for (uint32_t i = 0; i < MAX_FLOWERS; i++)
     {
-      uint16_t my_i = (i + current_color + 1) % (MAX_FLOWERS);
+      uint32_t my_i = (i + current_color + 1) % MAX_FLOWERS;
       
       if (ttls[my_i] > 0)
       {
@@ -233,14 +234,14 @@ void meat()
     }
     
     #ifdef DEBUG
-    printf("meat() changing color to: %u ttl: %u\n", current_color, ttls[current_color]);
+    printf("meat() changing color to: %lu ttl: %lu\n", current_color, ttls[current_color]);
     #endif
     
     strip.show();
   }
   
   // update TTLs
-  for (uint16_t i = 0; i < MAX_FLOWERS; i++)
+  for (uint32_t i = 0; i < MAX_FLOWERS; i++)
   {
     if (ttls[i] > 0 && i != uniqueid)
     {
@@ -249,7 +250,7 @@ void meat()
       #ifdef DEBUG
       if (ttls[i] == 0)
       {
-        printf("meat() goodbye, friend! id: %u\n", i); 
+        printf("meat() goodbye, friend! id: %lu\n", i); 
       }
       #endif
     }

@@ -1,4 +1,4 @@
-#define DEBUG
+//#define DEBUG
 
 #include <SPI.h>
 #include <RF24.h>
@@ -6,7 +6,7 @@
 #include <SimpleTimer.h>
 #include <avr/pgmspace.h>
 
-static PROGMEM prog_uint32_t crc_table[16] = {
+const static PROGMEM prog_uint32_t crc_table[16] = {
     0x00000000, 0x1db71064, 0x3b6e20c8, 0x26d930ac,
     0x76dc4190, 0x6b6b51f4, 0x4db26158, 0x5005713c,
     0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c,
@@ -19,16 +19,20 @@ static PROGMEM prog_uint32_t crc_table[16] = {
 #include "printf.h"
 #endif
 
-#define RF_DATA_RATE     RF24_250KBPS       // range vs. P(on-air collision) trade-off
+#define LED_PIN          (2)                // 2 for actual FlowerFriend, 6 generally on Arduino Unos
+#define LED_BRIGHTNESS   (0.25)
+#define RF_DATA_RATE     (RF24_250KBPS)       // range vs. P(on-air collision) trade-off
+#define RF_CHANNEL       (50)
 #define RF_LAG_TERM      (0)                // given in iterations, compensates for longer on-air time
 #define RF_ADDR          (0xF0F0F0F0D2LL)
+#define SYNC_FUZZ        (10)               // allow flowers to be this many cycles off before forcing a sync
 #define MAX_FLOWERS      (255)
 #define FLOWER_TTL       (500)              // how many iterations to keep a flower in memory
 #define ITERS_PER_COLOR  (64)               // how long to display each flower's color
 #define TIME_PER_ITER    (20)               // time per iteration
-#define MIN_SEND_DELAY   (50)               // randomly send out packets within this time range
-#define MAX_SEND_DELAY   (500)              //   given in iterations
-#define TIME_TO_FLASH    (10)               // flash this many times upon synchronizing (given in iterations)
+#define MIN_SEND_DELAY   (1)               // randomly send out packets within this time range
+#define MAX_SEND_DELAY   (50)              //   given in iterations
+#define TIME_TO_FLASH    (6)               // flash this many times upon synchronizing (given in iterations)
 
 SimpleTimer timer;
 
@@ -48,21 +52,19 @@ uint32_t packet[8] = {0, };
 RF24 radio(9, 10);
 
 // LED
-Adafruit_NeoPixel strip = Adafruit_NeoPixel(1, 6, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel strip = Adafruit_NeoPixel(1, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 uint32_t Wheel (byte WheelPos) {
-  float brightness = 1.0;
-  
   WheelPos = 255 - WheelPos;
   
   if (WheelPos < 85) {
-    return strip.Color((255 - WheelPos * 3) * brightness, 0, WheelPos * 3 * brightness);
+    return strip.Color((255 - WheelPos * 3) * LED_BRIGHTNESS, 0, WheelPos * 3 * LED_BRIGHTNESS);
   } else if(WheelPos < 170) {
     WheelPos -= 85;
-    return strip.Color(0, WheelPos * 3 * brightness, (255 - WheelPos * 3) * brightness);
+    return strip.Color(0, WheelPos * 3 * LED_BRIGHTNESS, (255 - WheelPos * 3) * LED_BRIGHTNESS);
   } else {
     WheelPos -= 170;
-    return strip.Color(WheelPos * 3 * brightness, (255 - WheelPos * 3) * brightness, 0);
+    return strip.Color(WheelPos * 3 * LED_BRIGHTNESS, (255 - WheelPos * 3) * LED_BRIGHTNESS, 0);
   }
 }
 
@@ -104,6 +106,7 @@ void setup()
   radio.setAutoAck(0);
   radio.setPayloadSize(32);
   radio.setDataRate(RF_DATA_RATE);
+  radio.setChannel(RF_CHANNEL);
   radio.openWritingPipe(RF_ADDR);
   radio.openReadingPipe(1, RF_ADDR);
   radio.startListening();
@@ -209,24 +212,31 @@ void meat()
           ttls[packet[5]] = packet[6];
         } 
         
-        if ((abs(packet[2] - clock) > 1 || current_color != packet[3]) && packet[1] < uniqueid)
+        if (packet[1] < uniqueid)                           // only listen if sender has priority over us
         {
-          #ifdef DEBUG2
-          printf("out-of-sync time: %lu time+lag: %lu, current_color: %lu\n", packet[2], packet[2] + RF_LAG_TERM, packet[3]);
-          #endif
+          uint32_t dist1 = abs((int32_t)packet[2] - (int32_t)clock);
+          uint32_t dist2 = ITERS_PER_COLOR - dist1;
           
-          // setup our flashing light to show we're syncing
-          flashing = TIME_TO_FLASH;
-          
-          // copy timestamp and color
-          clock = packet[2] + RF_LAG_TERM;
-          
-          if (clock > ITERS_PER_COLOR)
+          if (dist1 > SYNC_FUZZ && dist2 > SYNC_FUZZ)       // only update if our clock is off by enough
           {
-            clock = ITERS_PER_COLOR;
-          }
+            #ifdef DEBUG2
+            printf("out-of-sync time: %lu time+lag: %lu, current_color: %lu\n", packet[2], packet[2] + RF_LAG_TERM, packet[3]);
+            #endif
             
-          current_color = packet[3];
+            // setup our flashing light to show we're syncing
+            flashing = TIME_TO_FLASH;
+            
+            // copy timestamp and color
+            clock = packet[2] + RF_LAG_TERM;
+            
+            if (clock > ITERS_PER_COLOR)
+            {
+              clock = ITERS_PER_COLOR;
+            }
+              
+            current_color = packet[3];
+            next_color = packet[5];
+          }
         }
       #ifdef DEBUG2
       } else {
@@ -305,7 +315,7 @@ void meat()
   {
     if (flashing % 2 == 0)
     {
-      strip.setPixelColor(0, strip.Color(255, 255, 255));
+      strip.setPixelColor(0, strip.Color(255 * LED_BRIGHTNESS, 255 * LED_BRIGHTNESS, 255 * LED_BRIGHTNESS));
     } else {
       strip.setPixelColor(0, strip.Color(0, 0, 0)); 
     }

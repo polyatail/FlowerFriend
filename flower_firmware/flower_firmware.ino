@@ -21,7 +21,7 @@ const static PROGMEM prog_uint32_t crc_table[16] = {
 
 #define LED_PIN          (2)                // 2 for actual FlowerFriend, 6 generally on Arduino Unos
 #define LED_BRIGHTNESS   (0.25)
-#define RF_DATA_RATE     (RF24_250KBPS)       // range vs. P(on-air collision) trade-off
+#define RF_DATA_RATE     (RF24_250KBPS)     // range vs. P(on-air collision) trade-off
 #define RF_CHANNEL       (50)
 #define RF_LAG_TERM      (0)                // given in iterations, compensates for longer on-air time
 #define RF_ADDR          (0xF0F0F0F0D2LL)
@@ -30,9 +30,9 @@ const static PROGMEM prog_uint32_t crc_table[16] = {
 #define FLOWER_TTL       (500)              // how many iterations to keep a flower in memory
 #define ITERS_PER_COLOR  (64)               // how long to display each flower's color
 #define TIME_PER_ITER    (20)               // time per iteration
-#define MIN_SEND_DELAY   (1)               // randomly send out packets within this time range
-#define MAX_SEND_DELAY   (50)              //   given in iterations
-#define TIME_TO_FLASH    (6)               // flash this many times upon synchronizing (given in iterations)
+#define MIN_SEND_DELAY   (1)                // randomly send out packets within this time range
+#define MAX_SEND_DELAY   (50)               //   given in iterations
+#define TIME_TO_FLASH    (0)                // flash this many times upon synchronizing (given in iterations)
 
 SimpleTimer timer;
 

@@ -25,9 +25,10 @@ const static PROGMEM prog_uint32_t crc_table[16] = {
 #define RF_CHANNEL       (50)
 #define RF_LAG_TERM      (0)                // given in iterations, compensates for longer on-air time
 #define RF_ADDR          (0xF0F0F0F0D2LL)
+#define PACKET_SIZE      (32)               // in bytes
 #define SYNC_FUZZ        (10)               // allow flowers to be this many cycles off before forcing a sync
 #define MAX_FLOWERS      (255)
-#define FLOWER_TTL       (500)              // how many iterations to keep a flower in memory
+#define FLOWER_TTL       (50)               // 10 * how many iterations to keep a flower in memory
 #define ITERS_PER_COLOR  (64)               // how long to display each flower's color
 #define TIME_PER_ITER    (20)               // time per iteration
 #define MIN_SEND_DELAY   (1)                // randomly send out packets within this time range
@@ -36,17 +37,18 @@ const static PROGMEM prog_uint32_t crc_table[16] = {
 
 SimpleTimer timer;
 
-uint32_t ttls[MAX_FLOWERS] = {0, };
+uint8_t ttls[MAX_FLOWERS] = {0, };
+uint8_t ttl_counter = 10;
 
-uint32_t uniqueid = 0;
-uint32_t clock = 0;
-uint32_t current_color = 0;
-uint32_t next_color = 0;
-uint32_t senddelay = 0;
-uint32_t flashing = 0;
+uint8_t uniqueid = 0;
+uint8_t clock = 0;
+uint8_t current_color = 0;
+uint8_t next_color = 0;
+uint8_t senddelay = 0;
+uint8_t flashing = 0;
 
 uint32_t last_packet_hash = 0;
-uint32_t packet[8] = {0, };
+uint8_t packet[PACKET_SIZE] = {0, };
 
 // radio
 RF24 radio(9, 10);
@@ -78,14 +80,13 @@ uint32_t crc_update (uint32_t crc, byte data)
     return crc;
 }
 
-uint32_t crc_packet (uint32_t *my_packet)
+uint32_t crc_packet (uint8_t *my_packet)
 {
   uint32_t crc = ~0L;
-  byte *my_byte_packet = (byte*)my_packet;
   
-  for (int i = 0; i < 4 * 7; i++)
+  for (int i = 0; i < PACKET_SIZE - 4; i++)
   {
-    crc = crc_update(crc, *my_byte_packet++);
+    crc = crc_update(crc, *my_packet++);
   }
   
   crc = ~crc;
@@ -104,7 +105,7 @@ void setup()
   radio.begin();
   radio.setRetries(0, 0);
   radio.setAutoAck(0);
-  radio.setPayloadSize(32);
+  radio.setPayloadSize(PACKET_SIZE);
   radio.setDataRate(RF_DATA_RATE);
   radio.setChannel(RF_CHANNEL);
   radio.openWritingPipe(RF_ADDR);
@@ -142,20 +143,23 @@ void meat()
     printf("free memory: %d\n", getFreeMemory());
     #endif
     
-    // fill packet
-    packet[1] = uniqueid;
-    packet[2] = clock;
-    packet[3] = current_color;
-    packet[4] = ttls[current_color];
-    packet[5] = next_color;
-    packet[6] = ttls[next_color];
+    // fill packet--first 4 bytes are the 32-bit hash
+    packet[4] = uniqueid;
+    packet[5] = clock;
+    packet[6] = current_color;
+    packet[7] = ttls[current_color];
+    packet[8] = next_color;
+    packet[9] = ttls[next_color];
     
     // generate checksum (RF24 CRC doesn't check payload contents)
-    uint32_t packet_hash = crc_packet(packet + 1);
-    packet[0] = packet_hash;
+    uint32_t packet_hash = crc_packet(packet + 4);
+    packet[0] = (packet_hash >> 0) & 0xFF;
+    packet[1] = (packet_hash >> 8) & 0xFF;
+    packet[2] = (packet_hash >> 16) & 0xFF;
+    packet[3] = (packet_hash >> 24) & 0xFF;
     
     #ifdef DEBUG
-    printf("sending packet id: %lu time: %lu current_color: %lu ttl: %lu hash: %lu",
+    printf("sending packet id: %u time: %u current_color: %u ttl: %u hash: %lu",
            uniqueid, clock, current_color, ttls[current_color], packet_hash);
     #endif
   
@@ -179,73 +183,76 @@ void meat()
   {
     radio.read(&packet, sizeof(packet));
     
-    if (packet[0] != last_packet_hash)
+    // unpack hash
+    uint32_t packet_hash = ((uint32_t)packet[0] << 0) | ((uint32_t)packet[1] << 8) | ((uint32_t)packet[2] << 16) | ((uint32_t)packet[3] << 24);
+    
+    if (packet_hash != last_packet_hash)
     {
-      last_packet_hash = packet[0];
+      last_packet_hash = packet_hash;
       
-      if (crc_packet(packet + 1) == packet[0])
+      if (crc_packet(packet + 4) == packet_hash)
       {
         #ifdef DEBUG
-        printf("recv'd packet my_id: %lu their_id: %lu my_time: %lu their_time: %lu\n", uniqueid, packet[1], clock, packet[2]);
+        printf("recv'd packet my_id: %lu their_id: %lu my_time: %lu their_time: %lu\n", uniqueid, packet[4], clock, packet[5]);
         #endif
         
         // update the sender's TTL
-        ttls[packet[1]] = FLOWER_TTL;
+        ttls[packet[4]] = FLOWER_TTL;
         
         // if the TTL of the color the sender is currently showing is greater than ours, update it
-        if (ttls[packet[3]] < packet[4])
+        if (ttls[packet[6]] < packet[7])
         {
           #ifdef DEBUG2
-          printf("mesh ttl update id: %lu old_ttl: %lu new_ttl: %lu\n", packet[3], ttls[packet[3]], packet[4]);
+          printf("mesh ttl update id: %lu old_ttl: %lu new_ttl: %lu\n", packet[6], ttls[packet[6]], packet[7]);
           #endif
              
-          ttls[packet[3]] = packet[4];
+          ttls[packet[6]] = packet[7];
         }
         
         // same for their next color
-        if (ttls[packet[5]] < packet[6])
+        if (ttls[packet[8]] < packet[9])
         {
           #ifdef DEBUG2
-          printf("mesh ttl update id: %lu old_ttl: %lu new_ttl: %lu\n", packet[5], ttls[packet[5]], packet[6]);
+          printf("mesh ttl update id: %lu old_ttl: %lu new_ttl: %lu\n", packet[8], ttls[packet[8]], packet[9]);
           #endif
              
-          ttls[packet[5]] = packet[6];
+          ttls[packet[8]] = packet[9];
         } 
         
-        if (packet[1] < uniqueid)                           // only listen if sender has priority over us
+        if (packet[4] < uniqueid)                           // only listen if sender has priority over us
         {
-          uint32_t dist1 = abs((int32_t)packet[2] - (int32_t)clock);
+          uint32_t dist1 = abs((int32_t)packet[5] - (int32_t)clock);
           uint32_t dist2 = ITERS_PER_COLOR - dist1;
           
           if (dist1 > SYNC_FUZZ && dist2 > SYNC_FUZZ)       // only update if our clock is off by enough
           {
             #ifdef DEBUG2
-            printf("out-of-sync time: %lu time+lag: %lu, current_color: %lu\n", packet[2], packet[2] + RF_LAG_TERM, packet[3]);
+            printf("out-of-sync time: %u time+lag: %u, current_color: %u\n", packet[5], packet[5] + RF_LAG_TERM, packet[6]);
             #endif
             
             // setup our flashing light to show we're syncing
             flashing = TIME_TO_FLASH;
             
             // copy timestamp and color
-            clock = packet[2] + RF_LAG_TERM;
+            clock = packet[5] + RF_LAG_TERM;
             
             if (clock > ITERS_PER_COLOR)
             {
               clock = ITERS_PER_COLOR;
             }
               
-            current_color = packet[3];
-            next_color = packet[5];
+            current_color = packet[6];
+            next_color = packet[8];
           }
         }
       #ifdef DEBUG2
       } else {
-        printf("invalid crc %lu != %lu\n", crc_packet(packet + 1), packet[0]);
+        printf("invalid crc %lu != %lu\n", crc_packet(packet + 4), packet_hash);
       #endif
       }
     #ifdef DEBUG2
     } else {
-      printf("ignore duplicate from id: %lu\n", packet[1]);
+      printf("ignore duplicate from id: %u\n", packet[4]);
     #endif
     }
   }
@@ -279,7 +286,7 @@ void meat()
     }
     
     #ifdef DEBUG
-    printf("current_color: %lu ttl: %lu next_color: %lu ttl: %lu\n",
+    printf("current_color: %u ttl: %u next_color: %u ttl: %u\n",
            current_color, ttls[current_color], next_color, ttls[next_color]);
     #endif
     
@@ -325,19 +332,26 @@ void meat()
   }
   
   // update TTLs
-  for (uint32_t i = 0; i < MAX_FLOWERS; i++)
+  if (ttl_counter == 0)
   {
-    if (ttls[i] > 0 && i != uniqueid)
+    for (uint32_t i = 0; i < MAX_FLOWERS; i++)
     {
-      ttls[i]--;
-      
-      #ifdef DEBUG
-      if (ttls[i] == 0)
+      if (ttls[i] > 0 && i != uniqueid)
       {
-        printf("goodbye id: %lu\n", i); 
+        ttls[i]--;
+        
+        #ifdef DEBUG
+        if (ttls[i] == 0)
+        {
+          printf("goodbye id: %lu\n", i); 
+        }
+        #endif
       }
-      #endif
     }
+    
+    ttl_counter = 10;
+  } else {
+    ttl_counter--;
   }
   
   // increment clock

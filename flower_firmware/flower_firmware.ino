@@ -48,6 +48,7 @@ uint8_t current_color = 0;
 uint8_t next_color = 0;
 uint8_t senddelay = 0;
 uint8_t flashing = 0;
+uint32_t flashing_color = 0;
 
 uint32_t last_packet_hash = 0;
 uint8_t packet[PACKET_SIZE] = {0, };
@@ -128,6 +129,12 @@ void setup()
   uniqueid = random(0, MAX_FLOWERS);
   
   ttls[uniqueid] = FLOWER_TTL;
+  
+  // flash our unique color a few times so we remember it
+  current_color = uniqueid;
+  next_color = uniqueid;
+  flashing = 30;
+  flashing_color = Wheel(uniqueid);
   
   timer.setInterval(TIME_PER_ITER, meat);
 }
@@ -277,6 +284,7 @@ void meat()
             
             // setup our flashing light to show we're syncing
             flashing = TIME_TO_FLASH;
+            flashing_color = strip.Color(255 * LED_BRIGHTNESS, 255 * LED_BRIGHTNESS, 255 * LED_BRIGHTNESS);
             
             // copy timestamp
             clock = packet[5] + RF_LAG_TERM;
@@ -356,7 +364,7 @@ void meat()
   {
     if (flashing % 2 == 0)
     {
-      strip.setPixelColor(0, strip.Color(255 * LED_BRIGHTNESS, 255 * LED_BRIGHTNESS, 255 * LED_BRIGHTNESS));
+      strip.setPixelColor(0, flashing_color);
     } else {
       strip.setPixelColor(0, strip.Color(0, 0, 0)); 
     }

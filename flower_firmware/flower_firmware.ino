@@ -38,7 +38,9 @@ const static PROGMEM prog_uint32_t crc_table[16] = {
 SimpleTimer timer;
 
 uint8_t ttls[MAX_FLOWERS] = {0, };
+bool seen[MAX_FLOWERS] = {0, };
 uint8_t ttl_counter = 10;
+uint8_t lowest_flower_seen = 0;
 
 uint8_t uniqueid = 0;
 uint8_t clock = 0;
@@ -143,13 +145,51 @@ void meat()
     printf("free memory: %d\n", getFreeMemory());
     #endif
     
-    // fill packet--first 4 bytes are the 32-bit hash
+    // fill packet
+    //    0-3        CRC32 hash
+    //    4          my color (uniqueid)
+    //    5          my clock
+    //    6          current color
+    //    7          current color TTL
+    //    8          current color
+    //    9          current color TTL
+    //    10-EOF     other colors and TTLs in my ttls[] array
     packet[4] = uniqueid;
     packet[5] = clock;
     packet[6] = current_color;
     packet[7] = ttls[current_color];
     packet[8] = next_color;
     packet[9] = ttls[next_color];
+    
+    memset(packet + 10, 0, PACKET_SIZE - 10);
+    
+    // fill packet with 'mesh' TTLs that we've cached
+    uint8_t last_color_in_packet = next_color;
+    
+    for (uint32_t i = 10; i < PACKET_SIZE; i += 2)
+    {
+      // find the next color with ttl > 0
+      for (uint32_t i = 0; i < MAX_FLOWERS; i++)
+      {
+        uint32_t my_i = (i + last_color_in_packet + 1) % MAX_FLOWERS;
+        
+        if (ttls[my_i] > 0)
+        {
+          last_color_in_packet = my_i;
+          break;
+        }
+      }
+      
+      // but don't waste time if we're repeating ourselves
+      if (last_color_in_packet == current_color)
+      {
+        break;
+      }
+      
+      // fill the packet until the packet is full      
+      packet[i] = last_color_in_packet;
+      packet[i + 1] = ttls[last_color_in_packet];
+    }
     
     // generate checksum (RF24 CRC doesn't check payload contents)
     uint32_t packet_hash = crc_packet(packet + 4);
@@ -199,32 +239,37 @@ void meat()
         // update the sender's TTL
         ttls[packet[4]] = FLOWER_TTL;
         
-        // if the TTL of the color the sender is currently showing is greater than ours, update it
-        if (ttls[packet[6]] < packet[7])
+        // note that we've seen this sender directly
+        seen[packet[4]] = 1;
+        
+        // iterate through the packet and copy higher TTLs shared by sender
+        for (uint32_t i = 6; i < PACKET_SIZE; i += 2)
         {
-          #ifdef DEBUG2
-          printf("mesh ttl update id: %lu old_ttl: %lu new_ttl: %lu\n", packet[6], ttls[packet[6]], packet[7]);
-          #endif
-             
-          ttls[packet[6]] = packet[7];
+          // don't waste time if there's nothing interesting in the packet
+          if (packet[i + 1] == 0)
+          {
+            break;
+          }
+
+          // if the TTL of the color the sender is currently showing is greater than ours, update it
+          if (ttls[packet[i]] < packet[i + 1])
+          {
+            #ifdef DEBUG2
+            printf("mesh ttl update id: %lu old_ttl: %lu new_ttl: %lu\n", packet[i], ttls[packet[i]], packet[i + 1]);
+            #endif
+               
+            ttls[packet[i]] = packet[i + 1];
+          }
         }
         
-        // same for their next color
-        if (ttls[packet[8]] < packet[9])
-        {
-          #ifdef DEBUG2
-          printf("mesh ttl update id: %lu old_ttl: %lu new_ttl: %lu\n", packet[8], ttls[packet[8]], packet[9]);
-          #endif
-             
-          ttls[packet[8]] = packet[9];
-        } 
-        
-        if (packet[4] < uniqueid)                           // only listen if sender has priority over us
+        // only listen if sender is the lowest sender in direct contact with us
+        if (packet[4] <= lowest_flower_seen)                
         {
           uint32_t dist1 = abs((int32_t)packet[5] - (int32_t)clock);
           uint32_t dist2 = ITERS_PER_COLOR - dist1;
           
-          if (dist1 > SYNC_FUZZ && dist2 > SYNC_FUZZ)       // only update if our clock is off by enough
+          // only update if our clock is off by enough
+          if (dist1 > SYNC_FUZZ && dist2 > SYNC_FUZZ)
           {
             #ifdef DEBUG2
             printf("out-of-sync time: %u time+lag: %u, current_color: %u\n", packet[5], packet[5] + RF_LAG_TERM, packet[6]);
@@ -233,15 +278,15 @@ void meat()
             // setup our flashing light to show we're syncing
             flashing = TIME_TO_FLASH;
             
-            // copy timestamp and color
+            // copy timestamp
             clock = packet[5] + RF_LAG_TERM;
             
             if (clock > ITERS_PER_COLOR)
             {
               clock = ITERS_PER_COLOR;
             }
-              
-            current_color = packet[6];
+            
+            // copy next color--leave current color so it's not jumpy
             next_color = packet[8];
           }
         }
@@ -260,20 +305,9 @@ void meat()
   // display next color
   if (clock % ITERS_PER_COLOR == 0)
   {
-    // start looking from the current color onward
-    for (uint32_t i = 0; i < MAX_FLOWERS; i++)
-    {
-      uint32_t my_i = (i + current_color + 1) % MAX_FLOWERS;
-      
-      if (ttls[my_i] > 0)
-      {
-        current_color = my_i;
-        strip.setPixelColor(0, Wheel(my_i));
-        break;
-      }
-    }
+    current_color = next_color;
     
-    // it's lame to repeat code, but repeat that code to find the next color
+    // find the new next_color
     for (uint32_t i = 0; i < MAX_FLOWERS; i++)
     {
       uint32_t my_i = (i + current_color + 1) % MAX_FLOWERS;
@@ -334,18 +368,28 @@ void meat()
   // update TTLs
   if (ttl_counter == 0)
   {
+    // keep track of the lowest uniqueid/color we've seen with our own eyes
+    lowest_flower_seen = uniqueid;
+    
     for (uint32_t i = 0; i < MAX_FLOWERS; i++)
     {
       if (ttls[i] > 0 && i != uniqueid)
       {
         ttls[i]--;
         
-        #ifdef DEBUG
         if (ttls[i] == 0)
         {
+          seen[i] = 0;
+          
+          #ifdef DEBUG
           printf("goodbye id: %lu\n", i); 
+          #endif
         }
-        #endif
+        
+        if (i < lowest_flower_seen && seen[i] == 1)
+        {
+          lowest_flower_seen = i;
+        }
       }
     }
     

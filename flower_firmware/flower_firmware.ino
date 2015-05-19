@@ -26,7 +26,7 @@ const static PROGMEM prog_uint32_t crc_table[16] = {
 #define RF_LAG_TERM      (0)                // given in iterations, compensates for longer on-air time
 #define RF_ADDR          (0xF0F0F0F0D2LL)
 #define PACKET_SIZE      (32)               // in bytes
-#define SYNC_FUZZ        (10)               // allow flowers to be this many cycles off before forcing a sync
+#define SYNC_FUZZ        (1)                // allow flowers to be this many cycles off before forcing a sync
 #define MAX_FLOWERS      (255)
 #define FLOWER_TTL       (50)               // 10 * how many iterations to keep a flower in memory
 #define ITERS_PER_COLOR  (64)               // how long to display each flower's color

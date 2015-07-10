@@ -1,12 +1,14 @@
 //#define DEBUG
+//#define DEBUG2
 
 #include <SPI.h>
-#include <RF24.h>
-#include <Adafruit_NeoPixel.h>
-#include <SimpleTimer.h>
 #include <avr/pgmspace.h>
 
-const static PROGMEM prog_uint32_t crc_table[16] = {
+#include "RF24.h"
+#include "Adafruit_NeoPixel.h"
+#include "SimpleTimer.h"
+
+const static uint32_t crc_table[16] PROGMEM = {
     0x00000000, 0x1db71064, 0x3b6e20c8, 0x26d930ac,
     0x76dc4190, 0x6b6b51f4, 0x4db26158, 0x5005713c,
     0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c,
@@ -14,18 +16,20 @@ const static PROGMEM prog_uint32_t crc_table[16] = {
 };
 
 #ifdef DEBUG
-#include <MemoryFree.h>
+//#include <MemoryFree.h>
 #include <SoftwareSerial.h>
 #include "printf.h"
 #endif
 
-#define LED_PIN          (2)                // 2 for actual FlowerFriend, 6 generally on Arduino Unos
-#define LED_BRIGHTNESS   (0.25)
+#define LED_PIN          (7)                // 2 for FF Rev. 2, 7 for FF Rev. 4
+#define LED_BRIGHTNESS   (0.2)
 #define RF_DATA_RATE     (RF24_250KBPS)     // range vs. P(on-air collision) trade-off
-#define RF_CHANNEL       (50)
+#define RF_CHANNEL       (10)               // 2.400 GHz + n MHz; WiFi operates 2.412 - 2.484 GHz; antenna is tuned to 2.450 GHz; max=2.527 GHz
 #define RF_LAG_TERM      (0)                // given in iterations, compensates for longer on-air time
 #define RF_ADDR          (0xF0F0F0F0D2LL)
-#define PACKET_SIZE      (32)               // in bytes
+#define PACKET_SIZE      (12)               // in bytes
+#define PACKET_RESEND    (5)                // send every packet this many times--at least one will get through, right?
+#define RESEND_DELAY     (50)
 #define SYNC_FUZZ        (1)                // allow flowers to be this many cycles off before forcing a sync
 #define MAX_FLOWERS      (255)
 #define FLOWER_TTL       (50)               // 10 * how many iterations to keep a flower in memory
@@ -100,7 +104,8 @@ uint32_t crc_packet (uint8_t *my_packet)
 void setup()
 {
   #ifdef DEBUG
-  mySerial.begin(115200);
+  //mySerial.begin(9600);
+  Serial.begin(9600);
   printf_begin();
   #endif
 
@@ -111,8 +116,9 @@ void setup()
   radio.setPayloadSize(PACKET_SIZE);
   radio.setDataRate(RF_DATA_RATE);
   radio.setChannel(RF_CHANNEL);
+  radio.setPALevel(RF24_PA_MAX);
   radio.openWritingPipe(RF_ADDR);
-  radio.openReadingPipe(1, RF_ADDR);
+  radio.setCRCLength(RF24_CRC_8);
   radio.startListening();
   
   #ifdef DEBUG
@@ -148,9 +154,9 @@ void meat()
 {
   if (senddelay == 0)
   {
-    #ifdef DEBUG
-    printf("free memory: %d\n", getFreeMemory());
-    #endif
+    //#ifdef DEBUG
+    //printf("free memory: %d\n", getFreeMemory());
+    //#endif
     
     // fill packet
     //    0-3        CRC32 hash
@@ -158,8 +164,8 @@ void meat()
     //    5          my clock
     //    6          current color
     //    7          current color TTL
-    //    8          current color
-    //    9          current color TTL
+    //    8          next color
+    //    9          next color TTL
     //    10-EOF     other colors and TTLs in my ttls[] array
     packet[4] = uniqueid;
     packet[5] = clock;
@@ -209,9 +215,15 @@ void meat()
     printf("sending packet id: %u time: %u current_color: %u ttl: %u hash: %lu",
            uniqueid, clock, current_color, ttls[current_color], packet_hash);
     #endif
-  
+
+    bool ok;
+
     radio.stopListening();
-    bool ok = radio.write(&packet, sizeof(packet));
+    for (uint8_t i = 0; i < PACKET_RESEND; i++)
+    {
+      ok = radio.write(&packet, sizeof(packet));
+      delayMicroseconds(RESEND_DELAY);
+    }
     radio.startListening();
     
     #ifdef DEBUG
@@ -240,7 +252,7 @@ void meat()
       if (crc_packet(packet + 4) == packet_hash)
       {
         #ifdef DEBUG
-        printf("recv'd packet my_id: %lu their_id: %lu my_time: %lu their_time: %lu\n", uniqueid, packet[4], clock, packet[5]);
+        printf("recv'd packet my_id: %u their_id: %u my_time: %u their_time: %u\n", uniqueid, packet[4], clock, packet[5]);
         #endif
         
         // update the sender's TTL
@@ -262,7 +274,7 @@ void meat()
           if (ttls[packet[i]] < packet[i + 1])
           {
             #ifdef DEBUG2
-            printf("mesh ttl update id: %lu old_ttl: %lu new_ttl: %lu\n", packet[i], ttls[packet[i]], packet[i + 1]);
+            printf("mesh ttl update id: %u old_ttl: %u new_ttl: %u\n", packet[i], ttls[packet[i]], packet[i + 1]);
             #endif
                
             ttls[packet[i]] = packet[i + 1];

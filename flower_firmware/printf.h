@@ -18,13 +18,14 @@
 
 #ifdef ARDUINO
 
-#include <SoftwareSerial.h>
+//#include <SoftwareSerial.h>
 
-SoftwareSerial mySerial(4, 5); // RX, TX
+//SoftwareSerial mySerial(0, 1); // RX, TX
 
 int serial_putc( char c, FILE * ) 
 {
-  mySerial.write( c );
+  Serial.write( c );
+  //mySerial.write( c );
 
   return c;
 } 

@@ -28,16 +28,14 @@ const static uint32_t crc_table[16] PROGMEM = {
 #define RF_LAG_TERM      (0)                // given in iterations, compensates for longer on-air time
 #define RF_ADDR          (0xF0F0F0F0D2LL)
 #define PACKET_SIZE      (12)               // in bytes
-#define PACKET_RESEND    (5)                // send every packet this many times--at least one will get through, right?
-#define RESEND_DELAY     (50)
-#define SYNC_FUZZ        (1)                // allow flowers to be this many cycles off before forcing a sync
+#define PACKET_RESEND    (2)                // send every packet this many times--at least one will get through, right?
+#define RESEND_DELAY     (100)
 #define MAX_FLOWERS      (255)
 #define FLOWER_TTL       (50)               // 10 * how many iterations to keep a flower in memory
 #define ITERS_PER_COLOR  (64)               // how long to display each flower's color
 #define TIME_PER_ITER    (20)               // time per iteration
-#define MIN_SEND_DELAY   (1)                // randomly send out packets within this time range
+#define MIN_SEND_DELAY   (30)                // randomly send out packets within this time range
 #define MAX_SEND_DELAY   (50)               //   given in iterations
-#define TIME_TO_FLASH    (0)                // flash this many times upon synchronizing (given in iterations)
 
 SimpleTimer timer;
 
@@ -179,12 +177,12 @@ void meat()
     // fill packet with 'mesh' TTLs that we've cached
     uint8_t last_color_in_packet = next_color;
     
-    for (uint32_t i = 10; i < PACKET_SIZE; i += 2)
+    for (uint8_t i = 10; i < PACKET_SIZE; i += 2)
     {
       // find the next color with ttl > 0
-      for (uint32_t i = 0; i < MAX_FLOWERS; i++)
+      for (uint8_t i = 0; i < MAX_FLOWERS; i++)
       {
-        uint32_t my_i = (i + last_color_in_packet + 1) % MAX_FLOWERS;
+        uint8_t my_i = (i + last_color_in_packet + 1) % MAX_FLOWERS;
         
         if (ttls[my_i] > 0)
         {
@@ -238,8 +236,16 @@ void meat()
     senddelay--;
   }
   
-  if (radio.available())
+  #ifdef DEBUG
+  uint8_t packetid = 0;
+  #endif
+  
+  while (radio.available() > 0)
   {
+    #ifdef DEBUG
+    packetid += 1;
+    #endif
+    
     radio.read(&packet, sizeof(packet));
     
     // unpack hash
@@ -252,7 +258,7 @@ void meat()
       if (crc_packet(packet + 4) == packet_hash)
       {
         #ifdef DEBUG
-        printf("recv'd packet my_id: %u their_id: %u my_time: %u their_time: %u\n", uniqueid, packet[4], clock, packet[5]);
+        printf("recv'd packet %u my_id: %u their_id: %u my_time: %u their_time: %u\n", packetid, uniqueid, packet[4], clock, packet[5]);
         #endif
         
         // update the sender's TTL
@@ -262,7 +268,7 @@ void meat()
         seen[packet[4]] = 1;
         
         // iterate through the packet and copy higher TTLs shared by sender
-        for (uint32_t i = 6; i < PACKET_SIZE; i += 2)
+        for (uint8_t i = 6; i < PACKET_SIZE; i += 2)
         {
           // don't waste time if there's nothing interesting in the packet
           if (packet[i + 1] == 0)
@@ -284,40 +290,46 @@ void meat()
         // only listen if sender is the lowest sender in direct contact with us
         if (packet[4] <= lowest_flower_seen)                
         {
-          uint32_t dist1 = abs((int32_t)packet[5] - (int32_t)clock);
-          uint32_t dist2 = ITERS_PER_COLOR - dist1;
-          
-          // only update if our clock is off by enough
-          if (dist1 > SYNC_FUZZ && dist2 > SYNC_FUZZ)
+          if (clock != packet[5] + RF_LAG_TERM || current_color != packet[6])
           {
             #ifdef DEBUG2
-            printf("out-of-sync time: %u time+lag: %u, current_color: %u\n", packet[5], packet[5] + RF_LAG_TERM, packet[6]);
+            printf("out-of-sync my_time: %u their_time+lag: %u, my_color: %u their_color: %u\n", clock, packet[5] + RF_LAG_TERM, current_color, packet[6]);
             #endif
-            
-            // setup our flashing light to show we're syncing
-            flashing = TIME_TO_FLASH;
-            flashing_color = strip.Color(255 * LED_BRIGHTNESS, 255 * LED_BRIGHTNESS, 255 * LED_BRIGHTNESS);
-            
+  
             // copy timestamp
             clock = packet[5] + RF_LAG_TERM;
             
-            if (clock > ITERS_PER_COLOR)
+            // we should actually be on the next color by now
+            if (clock >= ITERS_PER_COLOR)
             {
-              clock = ITERS_PER_COLOR;
+              clock = clock % ITERS_PER_COLOR;
+              current_color = packet[8];
+            // otherwise copy the current color of our sync buddy
+            } else {
+              current_color = packet[6];
             }
             
-            // copy next color--leave current color so it's not jumpy
-            next_color = packet[8];
+            // find the new next_color
+            for (uint8_t i = 0; i < MAX_FLOWERS; i++)
+            {
+              uint8_t my_i = (i + current_color + 1) % MAX_FLOWERS;
+              
+              if (ttls[my_i] > 0)
+              {
+                next_color = my_i;
+                break;
+              }
+            }
           }
         }
       #ifdef DEBUG2
       } else {
-        printf("invalid crc %lu != %lu\n", crc_packet(packet + 4), packet_hash);
+        printf("packet %u invalid crc %lu != %lu\n", packetid, crc_packet(packet + 4), packet_hash);
       #endif
       }
     #ifdef DEBUG2
     } else {
-      printf("ignore duplicate from id: %u\n", packet[4]);
+      printf("packet %u ignore duplicate from id: %u\n", packetid, packet[4]);
     #endif
     }
   }
@@ -328,9 +340,9 @@ void meat()
     current_color = next_color;
     
     // find the new next_color
-    for (uint32_t i = 0; i < MAX_FLOWERS; i++)
+    for (uint8_t i = 0; i < MAX_FLOWERS; i++)
     {
-      uint32_t my_i = (i + current_color + 1) % MAX_FLOWERS;
+      uint8_t my_i = (i + current_color + 1) % MAX_FLOWERS;
       
       if (ttls[my_i] > 0)
       {

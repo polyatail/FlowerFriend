@@ -16,8 +16,6 @@ const static uint32_t crc_table[16] PROGMEM = {
 };
 
 #ifdef DEBUG
-//#include <MemoryFree.h>
-#include <SoftwareSerial.h>
 #include "printf.h"
 #endif
 
@@ -138,10 +136,141 @@ bool sync_clock (uint8_t their_clock, uint8_t their_current_color, uint8_t their
   return 1;
 }
 
+bool send_sync_packet (uint8_t hops)
+{
+  // fill packet
+  //    0-3        CRC32 hash
+  //    4,5,6,7    255,0,255,0
+  //    8          clock
+  //    9          current color
+  //    10         next color
+  //    11         hops
+  packet[4] = 255;
+  packet[5] = 0;
+  packet[6] = 255;
+  packet[7] = 0;
+  packet[8] = clock;
+  packet[9] = current_color;
+  packet[10] = next_color;
+  packet[11] = hops;            
+  
+  memset(packet + 12, 0, PACKET_SIZE - 12);
+  
+  // generate checksum (RF24 CRC doesn't check payload contents)
+  uint32_t packet_hash = crc_packet(packet + 4);
+  packet[0] = (packet_hash >> 0) & 0xFF;
+  packet[1] = (packet_hash >> 8) & 0xFF;
+  packet[2] = (packet_hash >> 16) & 0xFF;
+  packet[3] = (packet_hash >> 24) & 0xFF;
+  
+  #ifdef DEBUG
+  printf("sending sync packet time: %u current_color: %u next_color: %u hops: %u hash: %lu",
+         clock, current_color, next_color, packet[11], packet_hash);
+  #endif
+
+  bool ok;
+
+  radio.stopListening();
+  for (uint8_t i = 0; i < PACKET_RESEND; i++)
+  {
+    ok = radio.write(&packet, sizeof(packet));
+    delayMicroseconds(RESEND_DELAY);
+  }
+  radio.startListening();
+  
+  #ifdef DEBUG
+  if (ok)
+    printf(" success\n");
+  else
+    printf(" failed\n");
+  #endif     
+
+  return bool;  
+}
+
+bool send_mesh_packet()
+{
+  // fill packet
+  //    0-3        CRC32 hash
+  //    4          my color (uniqueid)
+  //    5          my clock
+  //    6          current color
+  //    7          current color TTL
+  //    8          next color
+  //    9          next color TTL
+  //    10-EOF     other colors and TTLs in my ttls[] array
+  packet[4] = uniqueid;
+  packet[5] = clock;
+  packet[6] = current_color;
+  packet[7] = ttls[current_color];
+  packet[8] = next_color;
+  packet[9] = ttls[next_color];
+  
+  memset(packet + 10, 0, PACKET_SIZE - 10);
+  
+  // fill packet with 'mesh' TTLs that we've cached
+  uint8_t last_color_in_packet = next_color;
+  
+  for (uint8_t i = 10; i < PACKET_SIZE; i += 2)
+  {
+    // find the next color with ttl > 0
+    for (uint8_t i = 0; i < MAX_FLOWERS; i++)
+    {
+      uint8_t my_i = (i + last_color_in_packet + 1) % MAX_FLOWERS;
+      
+      if (ttls[my_i] > 0)
+      {
+        last_color_in_packet = my_i;
+        break;
+      }
+    }
+    
+    // but don't waste time if we're repeating ourselves
+    if (last_color_in_packet == current_color)
+    {
+      break;
+    }
+    
+    // fill the packet until the packet is full      
+    packet[i] = last_color_in_packet;
+    packet[i + 1] = ttls[last_color_in_packet];
+  }
+  
+  // generate checksum (RF24 CRC doesn't check payload contents)
+  uint32_t packet_hash = crc_packet(packet + 4);
+  packet[0] = (packet_hash >> 0) & 0xFF;
+  packet[1] = (packet_hash >> 8) & 0xFF;
+  packet[2] = (packet_hash >> 16) & 0xFF;
+  packet[3] = (packet_hash >> 24) & 0xFF;
+  
+  #ifdef DEBUG
+  printf("sending packet id: %u time: %u current_color: %u ttl: %u hash: %lu",
+         uniqueid, clock, current_color, ttls[current_color], packet_hash);
+  #endif
+
+  bool ok;
+
+  radio.stopListening();
+  for (uint8_t i = 0; i < PACKET_RESEND; i++)
+  {
+    ok = radio.write(&packet, sizeof(packet));
+    delayMicroseconds(RESEND_DELAY);
+  }
+  radio.startListening();
+  
+  #ifdef DEBUG
+  if (ok)
+    printf(" success\n");
+  else
+    printf(" failed\n");
+  #endif
+  
+  return ok;
+}
+
 void setup()
 {
   #ifdef DEBUG
-  //mySerial.begin(9600);
   Serial.begin(9600);
   printf_begin();
   #endif
@@ -189,87 +318,10 @@ void loop()
 
 void meat()
 {
+  // send our typical mesh packet
   if (senddelay == 0)
   {
-    //#ifdef DEBUG
-    //printf("free memory: %d\n", getFreeMemory());
-    //#endif
-    
-    // fill packet
-    //    0-3        CRC32 hash
-    //    4          my color (uniqueid)
-    //    5          my clock
-    //    6          current color
-    //    7          current color TTL
-    //    8          next color
-    //    9          next color TTL
-    //    10-EOF     other colors and TTLs in my ttls[] array
-    packet[4] = uniqueid;
-    packet[5] = clock;
-    packet[6] = current_color;
-    packet[7] = ttls[current_color];
-    packet[8] = next_color;
-    packet[9] = ttls[next_color];
-    
-    memset(packet + 10, 0, PACKET_SIZE - 10);
-    
-    // fill packet with 'mesh' TTLs that we've cached
-    uint8_t last_color_in_packet = next_color;
-    
-    for (uint8_t i = 10; i < PACKET_SIZE; i += 2)
-    {
-      // find the next color with ttl > 0
-      for (uint8_t i = 0; i < MAX_FLOWERS; i++)
-      {
-        uint8_t my_i = (i + last_color_in_packet + 1) % MAX_FLOWERS;
-        
-        if (ttls[my_i] > 0)
-        {
-          last_color_in_packet = my_i;
-          break;
-        }
-      }
-      
-      // but don't waste time if we're repeating ourselves
-      if (last_color_in_packet == current_color)
-      {
-        break;
-      }
-      
-      // fill the packet until the packet is full      
-      packet[i] = last_color_in_packet;
-      packet[i + 1] = ttls[last_color_in_packet];
-    }
-    
-    // generate checksum (RF24 CRC doesn't check payload contents)
-    uint32_t packet_hash = crc_packet(packet + 4);
-    packet[0] = (packet_hash >> 0) & 0xFF;
-    packet[1] = (packet_hash >> 8) & 0xFF;
-    packet[2] = (packet_hash >> 16) & 0xFF;
-    packet[3] = (packet_hash >> 24) & 0xFF;
-    
-    #ifdef DEBUG
-    printf("sending packet id: %u time: %u current_color: %u ttl: %u hash: %lu",
-           uniqueid, clock, current_color, ttls[current_color], packet_hash);
-    #endif
-
-    bool ok;
-
-    radio.stopListening();
-    for (uint8_t i = 0; i < PACKET_RESEND; i++)
-    {
-      ok = radio.write(&packet, sizeof(packet));
-      delayMicroseconds(RESEND_DELAY);
-    }
-    radio.startListening();
-    
-    #ifdef DEBUG
-    if (ok)
-      printf(" success\n");
-    else
-      printf(" failed\n");
-    #endif
-    
+    send_mesh_packet();    
     senddelay = random(MIN_SEND_DELAY, MAX_SEND_DELAY);
   } else {
     senddelay--;
@@ -278,7 +330,8 @@ void meat()
   #ifdef DEBUG
   uint8_t packetid = 0;
   #endif
-  
+
+  // deal with incoming data
   while (radio.available() > 0)
   {
     #ifdef DEBUG
@@ -290,55 +343,36 @@ void meat()
     // unpack hash
     uint32_t packet_hash = ((uint32_t)packet[0] << 0) | ((uint32_t)packet[1] << 8) | ((uint32_t)packet[2] << 16) | ((uint32_t)packet[3] << 24);
     
+    // is this a duplicate packet?
     if (packet_hash != last_packet_hash)
     {
       last_packet_hash = packet_hash;
       
+      // does the hash checkout?
       if (crc_packet(packet + 4) == packet_hash)
       {
-        // is this a sync packet? if so, sync to it and then rebroadcast if it hasn't decayed
-        // ignore it if we are the lowest flower in the network or if we are in direct contact with the lowest flower
+        // is this a sync packet?
         if (packet[4] == 255 && packet[5] == 0 && packet[6] == 255 && packet[7] == 0)
         {
           #ifdef DEBUG2
           printf("sync packet %u hops: %u", packetid, packet[11]);
           #endif
           
+          // only sync if we aren't the lowest flower in the network and aren't in direct contact
+          // with the lowest flower in the network
           if (uniqueid != lowest_flower_seen && seen[lowest_flower_seen] == 0)
           {
-            #ifdef DEBUG2
+            #ifdef DEBUG
             printf("\n");
             #endif
-            
+
+            sync_clock(packet[8], packet[9], packet[10]);
+
+            // don't rebroadcast if we have passed this sync packet around too much
             if (packet[11] < MAX_REBROADCAST)
             {
-              packet[11] += 1;
-              
-              #ifdef DEBUG
-              printf("rebroadcast sync packet time: %u current_color: %u next_color: %u hops: %u hash: %lu",
-                     clock, current_color, next_color, packet[11], packet_hash);
-              #endif
-          
-              bool ok;
-          
-              radio.stopListening();
-              for (uint8_t i = 0; i < PACKET_RESEND; i++)
-              {
-                ok = radio.write(&packet, sizeof(packet));
-                delayMicroseconds(RESEND_DELAY);
-              }
-              radio.startListening();
-              
-              #ifdef DEBUG
-              if (ok)
-                printf(" success\n");
-              else
-                printf(" failed\n");
-              #endif                  
+              send_sync_packet(packet[11] + 1);           
             }
-   
-            // packet[8] is the clock, packet[9] is the current color, packet[10] is the next color
-            sync_clock(packet[8], packet[9], packet[10]);
           } else {
             #ifdef DEBUG
             printf(" ignoring my_id: %u lfs: %u seen[lfs]: %u\n", uniqueid, lowest_flower_seen, seen[lowest_flower_seen]);
@@ -380,53 +414,7 @@ void meat()
           if (packet[4] == lowest_flower_seen)
           {
             sync_clock(packet[5], packet[6], packet[8]);
-
-            // fill packet
-            //    0-3        CRC32 hash
-            //    4,5,6,7    255,0,255,0
-            //    8          clock
-            //    9          current color
-            //    10         next color
-            //    11         hops
-            packet[4] = 255;
-            packet[5] = 0;
-            packet[6] = 255;
-            packet[7] = 0;
-            packet[8] = clock;
-            packet[9] = current_color;
-            packet[10] = next_color;
-            packet[11] = 0;            
-            
-            memset(packet + 12, 0, PACKET_SIZE - 12);
-            
-            // generate checksum (RF24 CRC doesn't check payload contents)
-            uint32_t packet_hash = crc_packet(packet + 4);
-            packet[0] = (packet_hash >> 0) & 0xFF;
-            packet[1] = (packet_hash >> 8) & 0xFF;
-            packet[2] = (packet_hash >> 16) & 0xFF;
-            packet[3] = (packet_hash >> 24) & 0xFF;
-            
-            #ifdef DEBUG
-            printf("origin sync packet time: %u current_color: %u next_color: %u hash: %lu",
-                   clock, current_color, next_color, packet_hash);
-            #endif
-        
-            bool ok;
-        
-            radio.stopListening();
-            for (uint8_t i = 0; i < PACKET_RESEND; i++)
-            {
-              ok = radio.write(&packet, sizeof(packet));
-              delayMicroseconds(RESEND_DELAY);
-            }
-            radio.startListening();
-            
-            #ifdef DEBUG
-            if (ok)
-              printf(" success\n");
-            else
-              printf(" failed\n");
-            #endif            
+            send_sync_packet(0);
           }
         }
       #ifdef DEBUG2

@@ -22,13 +22,14 @@ const static uint32_t crc_table[16] PROGMEM = {
 #endif
 
 #define LED_PIN          (7)                // 2 for FF Rev. 2, 7 for FF Rev. 4
-#define LED_BRIGHTNESS   (0.2)
+#define LED_BRIGHTNESS   (1)
 #define RF_DATA_RATE     (RF24_250KBPS)     // range vs. P(on-air collision) trade-off
 #define RF_CHANNEL       (10)               // 2.400 GHz + n MHz; WiFi operates 2.412 - 2.484 GHz; antenna is tuned to 2.450 GHz; max=2.527 GHz
 #define RF_LAG_TERM      (0)                // given in iterations, compensates for longer on-air time
 #define RF_ADDR          (0xF0F0F0F0D2LL)
 #define PACKET_SIZE      (12)               // in bytes
 #define PACKET_RESEND    (2)                // send every packet this many times--at least one will get through, right?
+#define MAX_REBROADCAST  (3)
 #define RESEND_DELAY     (100)
 #define MAX_FLOWERS      (255)
 #define FLOWER_TTL       (50)               // 10 * how many iterations to keep a flower in memory
@@ -40,6 +41,7 @@ const static uint32_t crc_table[16] PROGMEM = {
 SimpleTimer timer;
 
 uint8_t ttls[MAX_FLOWERS] = {0, };
+uint8_t seen_ttls[MAX_FLOWERS] = {0, };
 bool seen[MAX_FLOWERS] = {0, };
 uint8_t ttl_counter = 10;
 uint8_t lowest_flower_seen = 0;
@@ -97,6 +99,43 @@ uint32_t crc_packet (uint8_t *my_packet)
   crc = ~crc;
   
   return crc;
+}
+
+bool sync_clock (uint8_t their_clock, uint8_t their_current_color, uint8_t their_next_color)
+{
+  if (clock != their_clock + RF_LAG_TERM || current_color != their_current_color)
+  {
+    #ifdef DEBUG2
+    printf("out-of-sync my_time: %u their_time+lag: %u, my_color: %u their_color: %u\n", clock, their_clock + RF_LAG_TERM, current_color, their_current_color);
+    #endif
+
+    // copy timestamp
+    clock = their_clock + RF_LAG_TERM;
+    
+    // we should actually be on the next color by now
+    if (clock >= ITERS_PER_COLOR)
+    {
+      clock = clock % ITERS_PER_COLOR;
+      current_color = their_next_color;
+    // otherwise copy the current color of our sync buddy
+    } else {
+      current_color = their_current_color;
+    }
+    
+    // find the new next_color
+    for (uint8_t i = 0; i < MAX_FLOWERS; i++)
+    {
+      uint8_t my_i = (i + current_color + 1) % MAX_FLOWERS;
+      
+      if (ttls[my_i] > 0)
+      {
+        next_color = my_i;
+        break;
+      }
+    }
+  }
+  
+  return 1;
 }
 
 void setup()
@@ -257,69 +296,137 @@ void meat()
       
       if (crc_packet(packet + 4) == packet_hash)
       {
-        #ifdef DEBUG
-        printf("recv'd packet %u my_id: %u their_id: %u my_time: %u their_time: %u\n", packetid, uniqueid, packet[4], clock, packet[5]);
-        #endif
-        
-        // update the sender's TTL
-        ttls[packet[4]] = FLOWER_TTL;
-        
-        // note that we've seen this sender directly
-        seen[packet[4]] = 1;
-        
-        // iterate through the packet and copy higher TTLs shared by sender
-        for (uint8_t i = 6; i < PACKET_SIZE; i += 2)
+        // is this a sync packet? if so, sync to it and then rebroadcast if it hasn't decayed
+        // ignore it if we are the lowest flower in the network or if we are in direct contact with the lowest flower
+        if (packet[4] == 255 && packet[5] == 0 && packet[6] == 255 && packet[7] == 0)
         {
-          // don't waste time if there's nothing interesting in the packet
-          if (packet[i + 1] == 0)
-          {
-            break;
-          }
-
-          // if the TTL of the color the sender is currently showing is greater than ours, update it
-          if (ttls[packet[i]] < packet[i + 1])
+          #ifdef DEBUG2
+          printf("sync packet %u hops: %u", packetid, packet[11]);
+          #endif
+          
+          if (uniqueid != lowest_flower_seen && seen[lowest_flower_seen] == 0)
           {
             #ifdef DEBUG2
-            printf("mesh ttl update id: %u old_ttl: %u new_ttl: %u\n", packet[i], ttls[packet[i]], packet[i + 1]);
+            printf("\n");
             #endif
-               
-            ttls[packet[i]] = packet[i + 1];
-          }
-        }
-        
-        // only listen if sender is the lowest sender in direct contact with us
-        if (packet[4] <= lowest_flower_seen)                
-        {
-          if (clock != packet[5] + RF_LAG_TERM || current_color != packet[6])
-          {
-            #ifdef DEBUG2
-            printf("out-of-sync my_time: %u their_time+lag: %u, my_color: %u their_color: %u\n", clock, packet[5] + RF_LAG_TERM, current_color, packet[6]);
-            #endif
-  
-            // copy timestamp
-            clock = packet[5] + RF_LAG_TERM;
             
-            // we should actually be on the next color by now
-            if (clock >= ITERS_PER_COLOR)
+            if (packet[11] < MAX_REBROADCAST)
             {
-              clock = clock % ITERS_PER_COLOR;
-              current_color = packet[8];
-            // otherwise copy the current color of our sync buddy
-            } else {
-              current_color = packet[6];
-            }
-            
-            // find the new next_color
-            for (uint8_t i = 0; i < MAX_FLOWERS; i++)
-            {
-              uint8_t my_i = (i + current_color + 1) % MAX_FLOWERS;
+              packet[11] += 1;
               
-              if (ttls[my_i] > 0)
+              #ifdef DEBUG
+              printf("rebroadcast sync packet time: %u current_color: %u next_color: %u hops: %u hash: %lu",
+                     clock, current_color, next_color, packet[11], packet_hash);
+              #endif
+          
+              bool ok;
+          
+              radio.stopListening();
+              for (uint8_t i = 0; i < PACKET_RESEND; i++)
               {
-                next_color = my_i;
-                break;
+                ok = radio.write(&packet, sizeof(packet));
+                delayMicroseconds(RESEND_DELAY);
               }
+              radio.startListening();
+              
+              #ifdef DEBUG
+              if (ok)
+                printf(" success\n");
+              else
+                printf(" failed\n");
+              #endif                  
             }
+   
+            // packet[8] is the clock, packet[9] is the current color, packet[10] is the next color
+            sync_clock(packet[8], packet[9], packet[10]);
+          } else {
+            #ifdef DEBUG
+            printf(" ignoring my_id: %u lfs: %u seen[lfs]: %u\n", uniqueid, lowest_flower_seen, seen[lowest_flower_seen]);
+            #endif
+          }
+        } else {
+          #ifdef DEBUG
+          printf("recv'd packet %u my_id: %u their_id: %u my_time: %u their_time: %u\n", packetid, uniqueid, packet[4], clock, packet[5]);
+          #endif
+          
+          // update the sender's TTL
+          ttls[packet[4]] = FLOWER_TTL;
+          
+          // note that we've seen this sender directly
+          seen_ttls[packet[4]] = FLOWER_TTL;
+          seen[packet[4]] = 1;
+          
+          // iterate through the packet and copy higher TTLs shared by sender
+          for (uint8_t i = 6; i < PACKET_SIZE; i += 2)
+          {
+            // don't waste time if there's nothing interesting in the packet
+            if (packet[i + 1] == 0)
+            {
+              break;
+            }
+  
+            // if the TTL of the color the sender is currently showing is greater than ours, update it
+            if (ttls[packet[i]] < packet[i + 1])
+            {
+              #ifdef DEBUG2
+              printf("mesh ttl update id: %u old_ttl: %u new_ttl: %u\n", packet[i], ttls[packet[i]], packet[i + 1]);
+              #endif
+                 
+              ttls[packet[i]] = packet[i + 1];
+            }
+          }
+          
+          // is this packet from the lowest flower in the network? if so, sync and repeat it as a sync packet
+          if (packet[4] == lowest_flower_seen)
+          {
+            sync_clock(packet[5], packet[6], packet[8]);
+
+            // fill packet
+            //    0-3        CRC32 hash
+            //    4,5,6,7    255,0,255,0
+            //    8          clock
+            //    9          current color
+            //    10         next color
+            //    11         hops
+            packet[4] = 255;
+            packet[5] = 0;
+            packet[6] = 255;
+            packet[7] = 0;
+            packet[8] = clock;
+            packet[9] = current_color;
+            packet[10] = next_color;
+            packet[11] = 0;            
+            
+            memset(packet + 12, 0, PACKET_SIZE - 12);
+            
+            // generate checksum (RF24 CRC doesn't check payload contents)
+            uint32_t packet_hash = crc_packet(packet + 4);
+            packet[0] = (packet_hash >> 0) & 0xFF;
+            packet[1] = (packet_hash >> 8) & 0xFF;
+            packet[2] = (packet_hash >> 16) & 0xFF;
+            packet[3] = (packet_hash >> 24) & 0xFF;
+            
+            #ifdef DEBUG
+            printf("origin sync packet time: %u current_color: %u next_color: %u hash: %lu",
+                   clock, current_color, next_color, packet_hash);
+            #endif
+        
+            bool ok;
+        
+            radio.stopListening();
+            for (uint8_t i = 0; i < PACKET_RESEND; i++)
+            {
+              ok = radio.write(&packet, sizeof(packet));
+              delayMicroseconds(RESEND_DELAY);
+            }
+            radio.startListening();
+            
+            #ifdef DEBUG
+            if (ok)
+              printf(" success\n");
+            else
+              printf(" failed\n");
+            #endif            
           }
         }
       #ifdef DEBUG2
@@ -400,11 +507,25 @@ void meat()
   // update TTLs
   if (ttl_counter == 0)
   {
-    // keep track of the lowest uniqueid/color we've seen with our own eyes
+    // keep track of the lowest flower in the network
     lowest_flower_seen = uniqueid;
     
-    for (uint32_t i = 0; i < MAX_FLOWERS; i++)
+    for (uint8_t i = 0; i < MAX_FLOWERS; i++)
     {
+      if (seen_ttls[i] > 0)
+      {
+        seen_ttls[i]--;
+        
+        if (seen_ttls[i] == 0)
+        {
+          seen[i] = 0;
+          
+          #ifdef DEBUG
+          printf("out-of-contact id: %u\n", i); 
+          #endif
+        }
+      }
+      
       if (ttls[i] > 0 && i != uniqueid)
       {
         ttls[i]--;
@@ -414,11 +535,11 @@ void meat()
           seen[i] = 0;
           
           #ifdef DEBUG
-          printf("goodbye id: %lu\n", i); 
+          printf("goodbye id: %u\n", i); 
           #endif
         }
         
-        if (i < lowest_flower_seen && seen[i] == 1)
+        if (i < lowest_flower_seen)
         {
           lowest_flower_seen = i;
         }

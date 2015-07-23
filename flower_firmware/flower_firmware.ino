@@ -30,10 +30,11 @@ const static uint32_t crc_table[16] PROGMEM = {
 #define MAX_REBROADCAST  (3)
 #define RESEND_DELAY     (100)
 #define MAX_FLOWERS      (255)
-#define FLOWER_TTL       (50)               // 10 * how many iterations to keep a flower in memory
+#define FLOWER_TTL       (75)               // 10 * how many iterations to keep a flower in memory
+#define FLOWER_SEEN_TTL  (75)               // 10 * how many iterations to consider a flower directly seen
 #define ITERS_PER_COLOR  (64)               // how long to display each flower's color
 #define TIME_PER_ITER    (20)               // time per iteration
-#define MIN_SEND_DELAY   (30)                // randomly send out packets within this time range
+#define MIN_SEND_DELAY   (30)               // randomly send out packets within this time range
 #define MAX_SEND_DELAY   (50)               //   given in iterations
 
 SimpleTimer timer;
@@ -182,10 +183,10 @@ bool send_sync_packet (uint8_t hops)
   if (ok)
     printf(" success\n");
   else
-    printf(" failed\n");
+    printf(" failed\n"); 
   #endif     
 
-  return bool;  
+  return ok;  
 }
 
 bool send_mesh_packet()
@@ -360,7 +361,7 @@ void meat()
           
           // only sync if we aren't the lowest flower in the network and aren't in direct contact
           // with the lowest flower in the network
-          if (uniqueid != lowest_flower_seen && seen[lowest_flower_seen] == 0)
+          if (uniqueid != lowest_flower_seen)// && seen[lowest_flower_seen] == 0)
           {
             #ifdef DEBUG
             printf("\n");
@@ -387,7 +388,7 @@ void meat()
           ttls[packet[4]] = FLOWER_TTL;
           
           // note that we've seen this sender directly
-          seen_ttls[packet[4]] = FLOWER_TTL;
+          seen_ttls[packet[4]] = FLOWER_SEEN_TTL;
           seen[packet[4]] = 1;
           
           // iterate through the packet and copy higher TTLs shared by sender

@@ -25,7 +25,7 @@ const static uint32_t crc_table[16] PROGMEM = {
 #define RF_CHANNEL       (10)               // 2.400 GHz + n MHz; WiFi operates 2.412 - 2.484 GHz; antenna is tuned to 2.450 GHz; max=2.527 GHz
 #define RF_LAG_TERM      (0)                // given in iterations, compensates for longer on-air time
 #define RF_ADDR          (0xF0F0F0F0D2LL)
-#define PACKET_SIZE      (12)               // in bytes
+#define PACKET_SIZE      (13)               // in bytes
 #define PACKET_RESEND    (2)                // send every packet this many times--at least one will get through, right?
 #define MAX_REBROADCAST  (3)
 #define RESEND_DELAY     (100)
@@ -40,8 +40,6 @@ const static uint32_t crc_table[16] PROGMEM = {
 SimpleTimer timer;
 
 uint8_t ttls[MAX_FLOWERS] = {0, };
-uint8_t seen_ttls[MAX_FLOWERS] = {0, };
-bool seen[MAX_FLOWERS] = {0, };
 uint8_t ttl_counter = 10;
 uint8_t lowest_flower_seen = 0;
 
@@ -137,82 +135,32 @@ bool sync_clock (uint8_t their_clock, uint8_t their_current_color, uint8_t their
   return 1;
 }
 
-bool send_sync_packet (uint8_t hops)
-{
-  // fill packet
-  //    0-3        CRC32 hash
-  //    4,5,6,7    255,0,255,0
-  //    8          clock
-  //    9          current color
-  //    10         next color
-  //    11         hops
-  packet[4] = 255;
-  packet[5] = 0;
-  packet[6] = 255;
-  packet[7] = 0;
-  packet[8] = clock;
-  packet[9] = current_color;
-  packet[10] = next_color;
-  packet[11] = hops;            
-  
-  memset(packet + 12, 0, PACKET_SIZE - 12);
-  
-  // generate checksum (RF24 CRC doesn't check payload contents)
-  uint32_t packet_hash = crc_packet(packet + 4);
-  packet[0] = (packet_hash >> 0) & 0xFF;
-  packet[1] = (packet_hash >> 8) & 0xFF;
-  packet[2] = (packet_hash >> 16) & 0xFF;
-  packet[3] = (packet_hash >> 24) & 0xFF;
-  
-  #ifdef DEBUG
-  printf("sending sync packet time: %u current_color: %u next_color: %u hops: %u hash: %lu",
-         clock, current_color, next_color, packet[11], packet_hash);
-  #endif
-
-  bool ok;
-
-  radio.stopListening();
-  for (uint8_t i = 0; i < PACKET_RESEND; i++)
-  {
-    ok = radio.write(&packet, sizeof(packet));
-    delayMicroseconds(RESEND_DELAY);
-  }
-  radio.startListening();
-  
-  #ifdef DEBUG
-  if (ok)
-    printf(" success\n");
-  else
-    printf(" failed\n"); 
-  #endif     
-
-  return ok;  
-}
-
 bool send_mesh_packet()
 {
   // fill packet
   //    0-3        CRC32 hash
-  //    4          my color (uniqueid)
-  //    5          my clock
-  //    6          current color
-  //    7          current color TTL
-  //    8          next color
-  //    9          next color TTL
-  //    10-EOF     other colors and TTLs in my ttls[] array
-  packet[4] = uniqueid;
-  packet[5] = clock;
-  packet[6] = current_color;
-  packet[7] = ttls[current_color];
-  packet[8] = next_color;
-  packet[9] = ttls[next_color];
+  //    4          hops
+  //    5          my color (uniqueid)
+  //    6          my clock
+  //    7          current color
+  //    8          current color TTL
+  //    9          next color
+  //    10         next color TTL
+  //    11-EOF     other colors and TTLs in my ttls[] array
+  packet[4] = 0;
+  packet[5] = uniqueid;
+  packet[6] = clock;
+  packet[7] = current_color;
+  packet[8] = ttls[current_color];
+  packet[9] = next_color;
+  packet[10] = ttls[next_color];
   
-  memset(packet + 10, 0, PACKET_SIZE - 10);
+  memset(packet + 11, 0, PACKET_SIZE - 11);
   
   // fill packet with 'mesh' TTLs that we've cached
   uint8_t last_color_in_packet = next_color;
   
-  for (uint8_t i = 10; i < PACKET_SIZE; i += 2)
+  for (uint8_t i = 11; i < PACKET_SIZE; i += 2)
   {
     // find the next color with ttl > 0
     for (uint8_t i = 0; i < MAX_FLOWERS; i++)
@@ -269,6 +217,42 @@ bool send_mesh_packet()
   return ok;
 }
 
+bool rebroadcast_packet()
+{
+  packet[4] += 1;
+
+  // generate checksum (RF24 CRC doesn't check payload contents)
+  uint32_t packet_hash = crc_packet(packet + 4);
+  packet[0] = (packet_hash >> 0) & 0xFF;
+  packet[1] = (packet_hash >> 8) & 0xFF;
+  packet[2] = (packet_hash >> 16) & 0xFF;
+  packet[3] = (packet_hash >> 24) & 0xFF;
+  
+  #ifdef DEBUG
+  printf("rebroadcasting packet from id: %u hops: %u hash: %lu",
+         packet[5], packet[4], packet_hash);
+  #endif
+
+  bool ok;
+
+  radio.stopListening();
+  for (uint8_t i = 0; i < PACKET_RESEND; i++)
+  {
+    ok = radio.write(&packet, sizeof(packet));
+    delayMicroseconds(RESEND_DELAY);
+  }
+  radio.startListening();
+  
+  #ifdef DEBUG
+  if (ok)
+    printf(" success\n");
+  else
+    printf(" failed\n");
+  #endif
+  
+  return ok;
+}
+
 void setup()
 {
   #ifdef DEBUG
@@ -286,6 +270,7 @@ void setup()
   radio.setPALevel(RF24_PA_MAX);
   radio.openWritingPipe(RF_ADDR);
   radio.setCRCLength(RF24_CRC_8);
+  radio.setAddressWidth(3);
   radio.startListening();
   
   #ifdef DEBUG
@@ -322,7 +307,7 @@ void meat()
   // send our typical mesh packet
   if (senddelay == 0)
   {
-    send_mesh_packet();    
+    send_mesh_packet();
     senddelay = random(MIN_SEND_DELAY, MAX_SEND_DELAY);
   } else {
     senddelay--;
@@ -342,91 +327,83 @@ void meat()
     radio.read(&packet, sizeof(packet));
     
     // unpack hash
-    uint32_t packet_hash = ((uint32_t)packet[0] << 0) | ((uint32_t)packet[1] << 8) | ((uint32_t)packet[2] << 16) | ((uint32_t)packet[3] << 24);
+    uint32_t packet_hash = ((uint32_t)packet[0] << 0) | \
+                           ((uint32_t)packet[1] << 8) | \
+                           ((uint32_t)packet[2] << 16) | \
+                           ((uint32_t)packet[3] << 24);
     
     // is this a duplicate packet?
-    if (packet_hash != last_packet_hash)
+    if (packet_hash == last_packet_hash)
     {
-      last_packet_hash = packet_hash;
-      
-      // does the hash checkout?
-      if (crc_packet(packet + 4) == packet_hash)
-      {
-        // is this a sync packet?
-        if (packet[4] == 255 && packet[5] == 0 && packet[6] == 255 && packet[7] == 0)
-        {
-          #ifdef DEBUG2
-          printf("sync packet %u hops: %u", packetid, packet[11]);
-          #endif
-          
-          // only sync if we aren't the lowest flower in the network and aren't in direct contact
-          // with the lowest flower in the network
-          if (uniqueid != lowest_flower_seen)// && seen[lowest_flower_seen] == 0)
-          {
-            #ifdef DEBUG
-            printf("\n");
-            #endif
-
-            sync_clock(packet[8], packet[9], packet[10]);
-
-            // don't rebroadcast if we have passed this sync packet around too much
-            if (packet[11] < MAX_REBROADCAST)
-            {
-              send_sync_packet(packet[11] + 1);           
-            }
-          } else {
-            #ifdef DEBUG
-            printf(" ignoring my_id: %u lfs: %u seen[lfs]: %u\n", uniqueid, lowest_flower_seen, seen[lowest_flower_seen]);
-            #endif
-          }
-        } else {
-          #ifdef DEBUG
-          printf("recv'd packet %u my_id: %u their_id: %u my_time: %u their_time: %u\n", packetid, uniqueid, packet[4], clock, packet[5]);
-          #endif
-          
-          // update the sender's TTL
-          ttls[packet[4]] = FLOWER_TTL;
-          
-          // note that we've seen this sender directly
-          seen_ttls[packet[4]] = FLOWER_SEEN_TTL;
-          seen[packet[4]] = 1;
-          
-          // iterate through the packet and copy higher TTLs shared by sender
-          for (uint8_t i = 6; i < PACKET_SIZE; i += 2)
-          {
-            // don't waste time if there's nothing interesting in the packet
-            if (packet[i + 1] == 0)
-            {
-              break;
-            }
-  
-            // if the TTL of the color the sender is currently showing is greater than ours, update it
-            if (ttls[packet[i]] < packet[i + 1])
-            {
-              #ifdef DEBUG2
-              printf("mesh ttl update id: %u old_ttl: %u new_ttl: %u\n", packet[i], ttls[packet[i]], packet[i + 1]);
-              #endif
-                 
-              ttls[packet[i]] = packet[i + 1];
-            }
-          }
-          
-          // is this packet from the lowest flower in the network? if so, sync and repeat it as a sync packet
-          if (packet[4] == lowest_flower_seen)
-          {
-            sync_clock(packet[5], packet[6], packet[8]);
-            send_sync_packet(0);
-          }
-        }
       #ifdef DEBUG2
-      } else {
-        printf("packet %u invalid crc %lu != %lu\n", packetid, crc_packet(packet + 4), packet_hash);
-      #endif
-      }
-    #ifdef DEBUG2
-    } else {
       printf("packet %u ignore duplicate from id: %u\n", packetid, packet[4]);
+      #endif
+
+      continue;
+    }
+
+    last_packet_hash = packet_hash;
+      
+    // does the hash checkout?
+    if (crc_packet(packet + 4) != packet_hash)
+    {
+      #ifdef DEBUG2
+      printf("packet %u invalid crc %lu != %lu\n",
+             packetid, crc_packet(packet + 4), packet_hash);
+      #endif
+
+      continue;
+    }
+
+    // is this a rebroadcasted packet from this device?
+    if (packet[5] == uniqueid)
+    {
+      #ifdef DEBUG2
+      printf("packet %u is from self %u == %u -- ignoring\n",
+             packetid, packet[5], uniqueid);
+      #endif
+
+      continue;
+    }
+
+    #ifdef DEBUG
+    printf("recv'd packet %u my_id: %u their_id: %u my_time: %u their_time: %u\n", 
+           packetid, uniqueid, packet[5], clock, packet[6]);
     #endif
+          
+    // update the sender's TTL
+    ttls[packet[5]] = FLOWER_TTL;
+          
+    // iterate through the packet and copy higher TTLs shared by sender
+    for (uint8_t i = 7; i < PACKET_SIZE; i += 2)
+    {
+      // don't waste time if there's nothing interesting in the packet
+      if (packet[i + 1] == 0)
+      {
+        break;
+      }
+  
+      // if the TTL of the color the sender is currently showing is greater than ours, update it
+      if (ttls[packet[i]] < packet[i + 1])
+      {
+        #ifdef DEBUG2
+        printf("mesh ttl update id: %u old_ttl: %u new_ttl: %u\n", packet[i], ttls[packet[i]], packet[i + 1]);
+        #endif
+                 
+        ttls[packet[i]] = packet[i + 1];
+      }
+    }
+          
+    // is this packet from the lowest flower in the network? if so, sync
+    if (packet[5] == lowest_flower_seen)
+    {
+      sync_clock(packet[6], packet[7], packet[9]);
+    }
+
+    // rebroadcast if we should
+    if (packet[4] < MAX_REBROADCAST)
+    {
+      rebroadcast_packet();
     }
   }
 
@@ -501,37 +478,21 @@ void meat()
     
     for (uint8_t i = 0; i < MAX_FLOWERS; i++)
     {
-      if (seen_ttls[i] > 0)
-      {
-        seen_ttls[i]--;
-        
-        if (seen_ttls[i] == 0)
-        {
-          seen[i] = 0;
-          
-          #ifdef DEBUG
-          printf("out-of-contact id: %u\n", i); 
-          #endif
-        }
-      }
-      
       if (ttls[i] > 0 && i != uniqueid)
       {
         ttls[i]--;
-        
-        if (ttls[i] == 0)
-        {
-          seen[i] = 0;
-          
-          #ifdef DEBUG
-          printf("goodbye id: %u\n", i); 
-          #endif
-        }
         
         if (i < lowest_flower_seen)
         {
           lowest_flower_seen = i;
         }
+
+        #ifdef DEBUG
+        if (ttls[i] == 0)
+        {
+          printf("goodbye id: %u\n", i); 
+        }
+        #endif
       }
     }
     

@@ -23,7 +23,6 @@
 #define RESEND_DELAY     (100)
 #define MAX_FLOWERS      (255)
 #define FLOWER_TTL       (75)               // 10 * how many iterations to keep a flower in memory
-#define FLOWER_SEEN_TTL  (75)               // 10 * how many iterations to consider a flower directly seen
 #define ITERS_PER_COLOR  (64)               // how long to display each flower's color
 #define TIME_PER_ITER    (20)               // time per iteration
 #define MIN_SEND_DELAY   (30)               // randomly send out packets within this time range
@@ -282,7 +281,9 @@ void loop()
 
 void meat()
 {
-  // send our typical mesh packet
+  //
+  // OUTGOING WIRELESS--NORMAL MESH PACKET
+  //
   if (senddelay == 0)
   {
     send_mesh_packet();
@@ -295,7 +296,9 @@ void meat()
   uint8_t packetid = 0;
   #endif
 
-  // deal with incoming data
+  //
+  // INCOMING WIRELESS
+  //
   while (radio.available() > 0)
   {
     #ifdef DEBUG
@@ -378,33 +381,10 @@ void meat()
       rebroadcast_packet();
     }
   }
-
-  // display next color
-  if (clock == ITERS_PER_COLOR)
-  {
-    current_color = next_color;
-    
-    // find the new next_color
-    for (uint8_t i = 0; i < MAX_FLOWERS; i++)
-    {
-      uint8_t my_i = (i + current_color + 1) % MAX_FLOWERS;
-      
-      if (ttls[my_i] > 0)
-      {
-        next_color = my_i;
-        break;
-      }
-    }
-    
-    #ifdef DEBUG
-    printf("current_color: %u ttl: %u next_color: %u ttl: %u\n",
-           current_color, ttls[current_color], next_color, ttls[next_color]);
-    #endif
-    
-    strip.show();
-  }
   
-  // flash if we're flashing
+  //
+  // DISPLAY LED--EITHER FLASH OR FADING COLORS
+  //
   if (flashing > 0)
   {
     if (flashing % 2 == 0)
@@ -420,7 +400,7 @@ void meat()
     // fade between the two colors over ITERS_PER_COLOR iterations
     uint32_t fade_color[4] = {0, };
     
-    float fraction = (float)clock / (float)ITERS_PER_COLOR;
+    float fraction = (float)clock / ((float)ITERS_PER_COLOR - 1);
     
     for (int i = 0; i < 4; i++)
     {
@@ -442,7 +422,9 @@ void meat()
     strip.show();    
   }
   
-  // update TTLs
+  //
+  // DECREMENT TTLS OF OTHER UNITS SEEN
+  //
   if (ttl_counter == 0)
   {
     // keep track of the lowest flower in the network
@@ -473,6 +455,31 @@ void meat()
     ttl_counter--;
   }
   
-  // increment clock
+  //
+  // INCREMENT CLOCK AND DECIDE IF IT'S TIME TO SWITCH TO THE NEXT COLOR
+  //
   clock = (clock + 1) % ITERS_PER_COLOR;
+  
+  // display next color
+  if (clock == 0)
+  {
+    current_color = next_color;
+    
+    // find the new next_color
+    for (uint8_t i = 0; i < MAX_FLOWERS; i++)
+    {
+      uint8_t my_i = (i + current_color + 1) % MAX_FLOWERS;
+      
+      if (ttls[my_i] > 0)
+      {
+        next_color = my_i;
+        break;
+      }
+    }
+    
+    #ifdef DEBUG
+    printf("current_color: %u ttl: %u next_color: %u ttl: %u\n",
+           current_color, ttls[current_color], next_color, ttls[next_color]);
+    #endif
+  }
 }

@@ -2,18 +2,10 @@
 //#define DEBUG2
 
 #include <SPI.h>
-#include <avr/pgmspace.h>
 
 #include "RF24.h"
 #include "Adafruit_NeoPixel.h"
 #include "SimpleTimer.h"
-
-const static uint32_t crc_table[16] PROGMEM = {
-    0x00000000, 0x1db71064, 0x3b6e20c8, 0x26d930ac,
-    0x76dc4190, 0x6b6b51f4, 0x4db26158, 0x5005713c,
-    0xedb88320, 0xf00f9344, 0xd6d6a3e8, 0xcb61b38c,
-    0x9b64c2b0, 0x86d3d2d4, 0xa00ae278, 0xbdbdf21c
-};
 
 #ifdef DEBUG
 #include "printf.h"
@@ -25,7 +17,7 @@ const static uint32_t crc_table[16] PROGMEM = {
 #define RF_CHANNEL       (10)               // 2.400 GHz + n MHz; WiFi operates 2.412 - 2.484 GHz; antenna is tuned to 2.450 GHz; max=2.527 GHz
 #define RF_LAG_TERM      (0)                // given in iterations, compensates for longer on-air time
 #define RF_ADDR          (0xF0F0F0F0D2LL)
-#define PACKET_SIZE      (13)               // in bytes
+#define PACKET_SIZE      (8)                // in bytes
 #define PACKET_RESEND    (2)                // send every packet this many times--at least one will get through, right?
 #define MAX_REBROADCAST  (3)
 #define RESEND_DELAY     (100)
@@ -51,7 +43,7 @@ uint8_t senddelay = 0;
 uint8_t flashing = 0;
 uint32_t flashing_color = 0;
 
-uint32_t last_packet_hash = 0;
+uint8_t last_packet_hash = 0;
 uint8_t packet[PACKET_SIZE] = {0, };
 
 // radio
@@ -74,27 +66,21 @@ uint32_t Wheel (byte WheelPos) {
   }
 }
 
-uint32_t crc_update (uint32_t crc, byte data)
-{
-    byte tbl_idx;
-    tbl_idx = crc ^ (data >> (0 * 4));
-    crc = pgm_read_dword_near(crc_table + (tbl_idx & 0x0f)) ^ (crc >> 4);
-    tbl_idx = crc ^ (data >> (1 * 4));
-    crc = pgm_read_dword_near(crc_table + (tbl_idx & 0x0f)) ^ (crc >> 4);
-    return crc;
-}
-
-uint32_t crc_packet (uint8_t *my_packet)
-{
-  uint32_t crc = ~0L;
-  
-  for (int i = 0; i < PACKET_SIZE - 4; i++)
-  {
-    crc = crc_update(crc, *my_packet++);
+//CRC-8 - based on the CRC8 formulas by Dallas/Maxim
+//code released under the therms of the GNU GPL 3.0 license
+byte CRC8(const byte *data, byte len) {
+  byte crc = 0x00;
+  while (len--) {
+    byte extract = *data++;
+    for (byte tempI = 8; tempI; tempI--) {
+      byte sum = (crc ^ extract) & 0x01;
+      crc >>= 1;
+      if (sum) {
+        crc ^= 0x8C;
+      }
+      extract >>= 1;
+    }
   }
-  
-  crc = ~crc;
-  
   return crc;
 }
 
@@ -138,29 +124,29 @@ bool sync_clock (uint8_t their_clock, uint8_t their_current_color, uint8_t their
 bool send_mesh_packet()
 {
   // fill packet
-  //    0-3        CRC32 hash
-  //    4          hops
-  //    5          my color (uniqueid)
-  //    6          my clock
-  //    7          current color
-  //    8          current color TTL
-  //    9          next color
-  //    10         next color TTL
-  //    11-EOF     other colors and TTLs in my ttls[] array
-  packet[4] = 0;
-  packet[5] = uniqueid;
-  packet[6] = clock;
-  packet[7] = current_color;
-  packet[8] = ttls[current_color];
-  packet[9] = next_color;
-  packet[10] = ttls[next_color];
+  //    0          CRC8 hash
+  //    1          hops
+  //    2          my color (uniqueid)
+  //    3          my clock
+  //    4          current color
+  //    5          current color TTL
+  //    6          next color
+  //    7          next color TTL
+  //    8-EOF      other colors and TTLs in my ttls[] array
+  packet[1] = 0;
+  packet[2] = uniqueid;
+  packet[3] = clock;
+  packet[4] = current_color;
+  packet[5] = ttls[current_color];
+  packet[6] = next_color;
+  packet[7] = ttls[next_color];
   
-  memset(packet + 11, 0, PACKET_SIZE - 11);
+  memset(packet + 8, 0, PACKET_SIZE - 8);
   
   // fill packet with 'mesh' TTLs that we've cached
   uint8_t last_color_in_packet = next_color;
   
-  for (uint8_t i = 11; i < PACKET_SIZE; i += 2)
+  for (uint8_t i = 8; i < PACKET_SIZE; i += 2)
   {
     // find the next color with ttl > 0
     for (uint8_t i = 0; i < MAX_FLOWERS; i++)
@@ -186,15 +172,11 @@ bool send_mesh_packet()
   }
   
   // generate checksum (RF24 CRC doesn't check payload contents)
-  uint32_t packet_hash = crc_packet(packet + 4);
-  packet[0] = (packet_hash >> 0) & 0xFF;
-  packet[1] = (packet_hash >> 8) & 0xFF;
-  packet[2] = (packet_hash >> 16) & 0xFF;
-  packet[3] = (packet_hash >> 24) & 0xFF;
+  packet[0] = CRC8(packet + 1, PACKET_SIZE - 1);
   
   #ifdef DEBUG
-  printf("sending packet id: %u time: %u current_color: %u ttl: %u hash: %lu",
-         uniqueid, clock, current_color, ttls[current_color], packet_hash);
+  printf("sending packet id: %u time: %u current_color: %u ttl: %u hash: %u",
+         uniqueid, clock, current_color, ttls[current_color], packet[0]);
   #endif
 
   bool ok;
@@ -219,18 +201,14 @@ bool send_mesh_packet()
 
 bool rebroadcast_packet()
 {
-  packet[4] += 1;
+  packet[1] += 1;
 
   // generate checksum (RF24 CRC doesn't check payload contents)
-  uint32_t packet_hash = crc_packet(packet + 4);
-  packet[0] = (packet_hash >> 0) & 0xFF;
-  packet[1] = (packet_hash >> 8) & 0xFF;
-  packet[2] = (packet_hash >> 16) & 0xFF;
-  packet[3] = (packet_hash >> 24) & 0xFF;
+  packet[0] = CRC8(packet + 1, PACKET_SIZE - 1);
   
   #ifdef DEBUG
-  printf("rebroadcasting packet from id: %u hops: %u hash: %lu",
-         packet[5], packet[4], packet_hash);
+  printf("rebroadcasting packet from id: %u hops: %u hash: %u",
+         packet[2], packet[1], packet[0]);
   #endif
 
   bool ok;
@@ -326,14 +304,8 @@ void meat()
     
     radio.read(&packet, sizeof(packet));
     
-    // unpack hash
-    uint32_t packet_hash = ((uint32_t)packet[0] << 0) | \
-                           ((uint32_t)packet[1] << 8) | \
-                           ((uint32_t)packet[2] << 16) | \
-                           ((uint32_t)packet[3] << 24);
-    
     // is this a duplicate packet?
-    if (packet_hash == last_packet_hash)
+    if (packet[0] == last_packet_hash)
     {
       #ifdef DEBUG2
       printf("packet %u ignore duplicate from id: %u\n", packetid, packet[4]);
@@ -342,25 +314,25 @@ void meat()
       continue;
     }
 
-    last_packet_hash = packet_hash;
+    last_packet_hash = packet[0];
       
     // does the hash checkout?
-    if (crc_packet(packet + 4) != packet_hash)
+    if (CRC8(packet + 1, PACKET_SIZE - 1) != packet[0])
     {
       #ifdef DEBUG2
-      printf("packet %u invalid crc %lu != %lu\n",
-             packetid, crc_packet(packet + 4), packet_hash);
+      printf("packet %u invalid crc %u != %u\n",
+             packetid, CRC8(packet + 1, PACKET_SIZE - 1), packet[0]);
       #endif
 
       continue;
     }
 
     // is this a rebroadcasted packet from this device?
-    if (packet[5] == uniqueid)
+    if (packet[2] == uniqueid)
     {
       #ifdef DEBUG2
       printf("packet %u is from self %u == %u -- ignoring\n",
-             packetid, packet[5], uniqueid);
+             packetid, packet[2], uniqueid);
       #endif
 
       continue;
@@ -368,14 +340,14 @@ void meat()
 
     #ifdef DEBUG
     printf("recv'd packet %u my_id: %u their_id: %u my_time: %u their_time: %u\n", 
-           packetid, uniqueid, packet[5], clock, packet[6]);
+           packetid, uniqueid, packet[2], clock, packet[3]);
     #endif
           
     // update the sender's TTL
-    ttls[packet[5]] = FLOWER_TTL;
+    ttls[packet[2]] = FLOWER_TTL;
           
     // iterate through the packet and copy higher TTLs shared by sender
-    for (uint8_t i = 7; i < PACKET_SIZE; i += 2)
+    for (uint8_t i = 4; i < PACKET_SIZE; i += 2)
     {
       // don't waste time if there's nothing interesting in the packet
       if (packet[i + 1] == 0)
@@ -395,20 +367,20 @@ void meat()
     }
           
     // is this packet from the lowest flower in the network? if so, sync
-    if (packet[5] == lowest_flower_seen)
+    if (packet[2] <= lowest_flower_seen)
     {
-      sync_clock(packet[6], packet[7], packet[9]);
+      sync_clock(packet[3], packet[4], packet[6]);
     }
 
     // rebroadcast if we should
-    if (packet[4] < MAX_REBROADCAST)
+    if (packet[1] < MAX_REBROADCAST)
     {
       rebroadcast_packet();
     }
   }
 
   // display next color
-  if (clock % ITERS_PER_COLOR == 0)
+  if (clock == ITERS_PER_COLOR)
   {
     current_color = next_color;
     
@@ -430,6 +402,20 @@ void meat()
     #endif
     
     strip.show();
+  }
+  
+  // flash if we're flashing
+  if (flashing > 0)
+  {
+    if (flashing % 2 == 0)
+    {
+      strip.setPixelColor(0, flashing_color);
+    } else {
+      strip.setPixelColor(0, strip.Color(0, 0, 0)); 
+    }
+    
+    strip.show();
+    flashing--;
   } else {
     // fade between the two colors over ITERS_PER_COLOR iterations
     uint32_t fade_color[4] = {0, };
@@ -453,21 +439,7 @@ void meat()
     }
 
     strip.setPixelColor(0, fade_color[0] | fade_color[1] | fade_color[2] | fade_color[3]);
-    strip.show();
-  }
-  
-  // flash if we're flashing
-  if (flashing > 0)
-  {
-    if (flashing % 2 == 0)
-    {
-      strip.setPixelColor(0, flashing_color);
-    } else {
-      strip.setPixelColor(0, strip.Color(0, 0, 0)); 
-    }
-    
-    strip.show();
-    flashing--;
+    strip.show();    
   }
   
   // update TTLs
@@ -481,18 +453,18 @@ void meat()
       if (ttls[i] > 0 && i != uniqueid)
       {
         ttls[i]--;
-        
-        if (i < lowest_flower_seen)
-        {
-          lowest_flower_seen = i;
-        }
 
-        #ifdef DEBUG
         if (ttls[i] == 0)
         {
-          printf("goodbye id: %u\n", i); 
+          #ifdef DEBUG
+          printf("goodbye id: %u\n", i);
+          #endif
+        } else {
+          if (i < lowest_flower_seen)
+          {
+            lowest_flower_seen = i;
+          }
         }
-        #endif
       }
     }
     

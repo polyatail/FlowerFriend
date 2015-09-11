@@ -1,0 +1,5 @@
+#!/bin/bash
+
+avrdude -c usbtiny -p atmega328p -v
+avrdude -c usbtiny -p atmega328p -v -U lfuse:w:0xE2:m -U hfuse:w:0xDA:m -U efuse:w:0x06:m
+avrdude -c usbtiny -p atmega328p -v -e -U flash:w:ATmegaBOOT_168_atmega328_pro_8MHz.hex -U lock:w:0x0F:m

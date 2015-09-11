@@ -15,10 +15,10 @@
 #define LED_BRIGHTNESS   (1)
 #define RF_DATA_RATE     (RF24_250KBPS)     // range vs. P(on-air collision) trade-off
 #define RF_CHANNEL       (10)               // 2.400 GHz + n MHz; WiFi operates 2.412 - 2.484 GHz; antenna is tuned to 2.450 GHz; max=2.527 GHz
-#define RF_LAG_TERM      (0)                // given in iterations, compensates for longer on-air time
+#define RF_LAG_TERM      (1)                // given in iterations, compensates for longer on-air time
 #define RF_ADDR          (0xF0F0F0F0D2LL)
 #define PACKET_SIZE      (8)                // in bytes
-#define PACKET_RESEND    (2)                // send every packet this many times--at least one will get through, right?
+#define PACKET_RESEND    (3)                // send every packet this many times--at least one will get through, right?
 #define MAX_REBROADCAST  (3)
 #define RESEND_DELAY     (100)
 #define MAX_FLOWERS      (255)
@@ -27,6 +27,7 @@
 #define TIME_PER_ITER    (20)               // time per iteration
 #define MIN_SEND_DELAY   (30)               // randomly send out packets within this time range
 #define MAX_SEND_DELAY   (50)               //   given in iterations
+#define MAX_DUPLICATES   (10)               // keep track of this many previous hashes
 
 SimpleTimer timer;
 
@@ -42,7 +43,8 @@ uint8_t senddelay = 0;
 uint8_t flashing = 0;
 uint32_t flashing_color = 0;
 
-uint8_t last_packet_hash = 0;
+uint8_t duplicates[MAX_DUPLICATES] = {0, };
+uint8_t duplicate_pos = 0;
 uint8_t packet[PACKET_SIZE] = {0, };
 
 // radio
@@ -83,7 +85,7 @@ byte CRC8(const byte *data, byte len) {
   return crc;
 }
 
-bool sync_clock (uint8_t their_clock, uint8_t their_current_color, uint8_t their_next_color)
+bool sync_clock (uint8_t hops, uint8_t their_clock, uint8_t their_current_color, uint8_t their_next_color)
 {
   if (clock != their_clock + RF_LAG_TERM || current_color != their_current_color)
   {
@@ -92,7 +94,7 @@ bool sync_clock (uint8_t their_clock, uint8_t their_current_color, uint8_t their
     #endif
 
     // copy timestamp
-    clock = their_clock + RF_LAG_TERM;
+    clock = their_clock + RF_LAG_TERM + (hops * 1);
     
     // we should actually be on the next color by now
     if (clock >= ITERS_PER_COLOR)
@@ -233,7 +235,7 @@ bool rebroadcast_packet()
 void setup()
 {
   #ifdef DEBUG
-  Serial.begin(9600);
+  Serial.begin(57600);
   printf_begin();
   #endif
 
@@ -308,16 +310,29 @@ void meat()
     radio.read(&packet, sizeof(packet));
     
     // is this a duplicate packet?
-    if (packet[0] == last_packet_hash)
+    uint8_t payload_hash = CRC8(packet + 2, PACKET_SIZE - 2);
+    bool duplicate_flag = 0;
+    
+    for (uint8_t i = 0; i < MAX_DUPLICATES; i++)
     {
-      #ifdef DEBUG2
-      printf("packet %u ignore duplicate from id: %u\n", packetid, packet[4]);
-      #endif
-
-      continue;
+      if (payload_hash == duplicates[i])
+      {
+        #ifdef DEBUG2
+        printf("packet %u ignore duplicate from id: %u\n", packetid, packet[4]);
+        #endif
+        
+        duplicate_flag = 1;
+        break;
+      }
     }
-
-    last_packet_hash = packet[0];
+    
+    if (duplicate_flag)
+    {
+      continue;
+    } else {
+      duplicates[duplicate_pos] = payload_hash;
+      duplicate_pos = (duplicate_pos + 1) % MAX_DUPLICATES;
+    }
       
     // does the hash checkout?
     if (CRC8(packet + 1, PACKET_SIZE - 1) != packet[0])
@@ -334,7 +349,7 @@ void meat()
     if (packet[2] == uniqueid)
     {
       #ifdef DEBUG2
-      printf("packet %u is from self %u == %u -- ignoring\n",
+      printf("packet %u is from self %u == %u ignoring\n",
              packetid, packet[2], uniqueid);
       #endif
 
@@ -342,8 +357,8 @@ void meat()
     }
 
     #ifdef DEBUG
-    printf("recv'd packet %u my_id: %u their_id: %u my_time: %u their_time: %u\n", 
-           packetid, uniqueid, packet[2], clock, packet[3]);
+    printf("recv'd packet %u hops: %u my_id: %u their_id: %u my_time: %u their_time: %u\n", 
+           packetid, packet[1], uniqueid, packet[2], clock, packet[3]);
     #endif
           
     // update the sender's TTL
@@ -372,7 +387,7 @@ void meat()
     // is this packet from the lowest flower in the network? if so, sync
     if (packet[2] <= lowest_flower_seen)
     {
-      sync_clock(packet[3], packet[4], packet[6]);
+      sync_clock(packet[1], packet[3], packet[4], packet[6]);
     }
 
     // rebroadcast if we should
